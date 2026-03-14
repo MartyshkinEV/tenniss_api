@@ -1,9 +1,11 @@
 import numpy as np
 import pandas as pd
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 
-DB_URL = "postgresql://tennis_user:tennis_pass@localhost:5432/tennis"
-engine = create_engine(DB_URL)
+from src.db.engine import get_engine
+from config import settings
+
+engine = get_engine()
 
 
 BASE_ELO = 1500.0

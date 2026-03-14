@@ -1,30 +1,27 @@
 from pathlib import Path
+
 import pandas as pd
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 
-DB_URL = "postgresql+psycopg2://tennis_user:tennis_pass@localhost:5432/tennis"
-engine = create_engine(DB_URL)
+from config import settings
+from src.db.engine import get_engine
 
-ROOT = Path("/opt/tennis_ai/tennis_atp")
+engine = get_engine()
+ROOT = settings.data_dir
 
 INT_COLS_MATCHES = [
     "draw_size", "match_num", "best_of", "minutes",
-    "winner_id", "winner_ht",
-    "loser_id", "loser_ht",
-    "winner_rank", "winner_rank_points",
-    "loser_rank", "loser_rank_points",
+    "winner_id", "winner_ht", "loser_id", "loser_ht",
+    "winner_rank", "winner_rank_points", "loser_rank", "loser_rank_points",
     "w_ace", "w_df", "w_svpt", "w_1stin", "w_1stwon", "w_2ndwon", "w_svgms", "w_bpsaved", "w_bpfaced",
     "l_ace", "l_df", "l_svpt", "l_1stin", "l_1stwon", "l_2ndwon", "l_svgms", "l_bpsaved", "l_bpfaced",
 ]
+FLOAT_COLS_MATCHES = ["winner_age", "loser_age"]
 
-FLOAT_COLS_MATCHES = [
-    "winner_age", "loser_age",
-]
 
 def load_players():
     path = ROOT / "atp_players.csv"
     df = pd.read_csv(path, low_memory=False)
-
     cols = {c.lower(): c for c in df.columns}
 
     player_id_col = cols.get("player_id")
@@ -45,11 +42,7 @@ def load_players():
     out["hand"] = df[hand_col] if hand_col else None
     out["country_code"] = df[country_col] if country_col else None
     out["height_cm"] = pd.to_numeric(df[height_col], errors="coerce") if height_col else None
-
-    if birth_col:
-        out["birth_date"] = pd.to_datetime(df[birth_col], format="%Y%m%d", errors="coerce").dt.date
-    else:
-        out["birth_date"] = None
+    out["birth_date"] = pd.to_datetime(df[birth_col], format="%Y%m%d", errors="coerce").dt.date if birth_col else None
 
     out = out.dropna(subset=["player_id"])
     out["player_id"] = out["player_id"].astype("int64")
@@ -61,23 +54,16 @@ def load_players():
     out.to_sql("players", engine, if_exists="append", index=False, method="multi", chunksize=5000)
     print("players loaded:", len(out))
 
+
 def load_rankings():
     files = sorted(ROOT.glob("atp_rankings*.csv"))
 
     with engine.begin() as conn:
         conn.execute(text("DROP TABLE IF EXISTS rankings_stage"))
-        conn.execute(text("""
-            CREATE TABLE rankings_stage (
-                ranking_date DATE,
-                ranking INTEGER,
-                player_id BIGINT,
-                ranking_points INTEGER
-            )
-        """))
+        conn.execute(text("CREATE TABLE rankings_stage (ranking_date DATE, ranking INTEGER, player_id BIGINT, ranking_points INTEGER)"))
         conn.execute(text("TRUNCATE TABLE rankings"))
 
     total_stage = 0
-
     for path in files:
         df = pd.read_csv(path, header=None, low_memory=False)
         if df.shape[1] == 4:
@@ -114,13 +100,12 @@ def load_rankings():
 
     print("rankings staged total:", total_stage)
     with engine.begin() as conn:
-        final_count = conn.execute(text("SELECT COUNT(*) FROM rankings")).scalar()
-    print("rankings final:", final_count)
+        print("rankings final:", conn.execute(text("SELECT COUNT(*) FROM rankings")).scalar())
+
 
 def normalize_matches(df: pd.DataFrame, path: Path) -> pd.DataFrame:
     df = df.copy()
     df["source_file"] = path.name
-
     if "qual_chall" in path.name:
         df["level_group"] = "qual_chall"
     elif "futures" in path.name:
@@ -128,46 +113,29 @@ def normalize_matches(df: pd.DataFrame, path: Path) -> pd.DataFrame:
     else:
         df["level_group"] = "tour"
 
-    if "tourney_date" in df.columns:
-        df["tourney_date"] = pd.to_datetime(df["tourney_date"], format="%Y%m%d", errors="coerce").dt.date
-    else:
-        df["tourney_date"] = None
+    df["tourney_date"] = pd.to_datetime(df.get("tourney_date"), format="%Y%m%d", errors="coerce").dt.date
 
     wanted = [
-        "source_file", "level_group",
-        "tourney_id", "tourney_name", "surface", "draw_size", "tourney_level", "tourney_date",
-        "match_num", "best_of", "round", "minutes",
-        "winner_id", "winner_name", "winner_hand", "winner_ht", "winner_ioc", "winner_age",
-        "loser_id", "loser_name", "loser_hand", "loser_ht", "loser_ioc", "loser_age",
-        "winner_rank", "winner_rank_points", "loser_rank", "loser_rank_points",
-        "score",
-        "w_ace", "w_df", "w_svpt", "w_1stIn", "w_1stWon", "w_2ndWon", "w_SvGms", "w_bpSaved", "w_bpFaced",
-        "l_ace", "l_df", "l_svpt", "l_1stIn", "l_1stWon", "l_2ndWon", "l_SvGms", "l_bpSaved", "l_bpFaced",
+        "source_file", "level_group", "tourney_id", "tourney_name", "surface", "draw_size", "tourney_level", "tourney_date",
+        "match_num", "best_of", "round", "minutes", "winner_id", "winner_name", "winner_hand", "winner_ht", "winner_ioc",
+        "winner_age", "loser_id", "loser_name", "loser_hand", "loser_ht", "loser_ioc", "loser_age", "winner_rank",
+        "winner_rank_points", "loser_rank", "loser_rank_points", "score", "w_ace", "w_df", "w_svpt", "w_1stIn", "w_1stWon",
+        "w_2ndWon", "w_SvGms", "w_bpSaved", "w_bpFaced", "l_ace", "l_df", "l_svpt", "l_1stIn", "l_1stWon", "l_2ndWon",
+        "l_SvGms", "l_bpSaved", "l_bpFaced",
     ]
-
     for col in wanted:
         if col not in df.columns:
             df[col] = None
 
     out = df[wanted].rename(columns={
-        "w_1stIn": "w_1stin",
-        "w_1stWon": "w_1stwon",
-        "w_2ndWon": "w_2ndwon",
-        "w_SvGms": "w_svgms",
-        "w_bpSaved": "w_bpsaved",
-        "w_bpFaced": "w_bpfaced",
-        "l_1stIn": "l_1stin",
-        "l_1stWon": "l_1stwon",
-        "l_2ndWon": "l_2ndwon",
-        "l_SvGms": "l_svgms",
-        "l_bpSaved": "l_bpsaved",
-        "l_bpFaced": "l_bpfaced",
+        "w_1stIn": "w_1stin", "w_1stWon": "w_1stwon", "w_2ndWon": "w_2ndwon", "w_SvGms": "w_svgms",
+        "w_bpSaved": "w_bpsaved", "w_bpFaced": "w_bpfaced", "l_1stIn": "l_1stin", "l_1stWon": "l_1stwon",
+        "l_2ndWon": "l_2ndwon", "l_SvGms": "l_svgms", "l_bpSaved": "l_bpsaved", "l_bpFaced": "l_bpfaced",
     })
 
     for col in INT_COLS_MATCHES:
         if col in out.columns:
             out[col] = pd.to_numeric(out[col], errors="coerce").astype("Int64")
-
     for col in FLOAT_COLS_MATCHES:
         if col in out.columns:
             out[col] = pd.to_numeric(out[col], errors="coerce")
@@ -175,37 +143,26 @@ def normalize_matches(df: pd.DataFrame, path: Path) -> pd.DataFrame:
     text_cols = [c for c in out.columns if c not in INT_COLS_MATCHES + FLOAT_COLS_MATCHES + ["tourney_date"]]
     for col in text_cols:
         out[col] = out[col].where(out[col].notna(), None)
-
     return out
+
 
 def load_matches():
     files = sorted(ROOT.glob("atp_matches_*.csv"))
     total = 0
-
     with engine.begin() as conn:
         conn.execute(text("TRUNCATE TABLE matches"))
 
     for path in files:
         if "doubles" in path.name or "amateur" in path.name:
             continue
-
         print("loading matches file:", path.name)
-        df = pd.read_csv(path, low_memory=False)
-        df = normalize_matches(df, path)
-
-        try:
-            df.to_sql("matches", engine, if_exists="append", index=False, method="multi", chunksize=2000)
-        except Exception:
-            print(f"FAILED file: {path.name}")
-            bad_path = ROOT / f"FAILED_{path.name}"
-            df.to_csv(bad_path, index=False)
-            print(f"saved failed dataframe to: {bad_path}")
-            raise
-
+        df = normalize_matches(pd.read_csv(path, low_memory=False), path)
+        df.to_sql("matches", engine, if_exists="append", index=False, method="multi", chunksize=2000)
         total += len(df)
         print("matches:", path.name, len(df))
 
     print("matches total:", total)
+
 
 if __name__ == "__main__":
     print("load players")
