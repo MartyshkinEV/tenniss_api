@@ -1,0 +1,28 @@
+# python
+__pycache__/
+*.pyc
+
+# virtualenv
+venv/
+.venv/
+
+# environment
+.env
+.env.*
+
+# models
+models/*.pkl
+models/*.joblib
+
+# datasets
+tennis_atp/
+tennis_pointbypoint/
+tennis_slam_pointbypoint/
+
+# logs
+*.log
+
+# system
+.DS_Store
+.vscode/
+.idea/
