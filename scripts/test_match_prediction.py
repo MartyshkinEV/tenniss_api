@@ -1,10 +1,15 @@
 import joblib
 import pandas as pd
-from sqlalchemy import create_engine
 
-engine = create_engine("postgresql://tennis_user:tennis_pass@localhost:5432/tennis")
 
-model = joblib.load("/opt/tennis_ai/models/match_winner/lightgbm_baseline.joblib")
+from src.db.engine import get_engine
+from config import settings
+
+engine = get_engine()
+
+model_path = settings.model_path("lightgbm_baseline.joblib")
+legacy_model_path = settings.project_root / "models" / "match_winner" / "lightgbm_baseline.joblib"
+model = joblib.load(model_path if model_path.exists() else legacy_model_path)
 
 query = """
 SELECT *

@@ -1,0 +1,8 @@
+pandas
+numpy
+SQLAlchemy
+psycopg2-binary
+scikit-learn
+lightgbm
+joblib
+pytest

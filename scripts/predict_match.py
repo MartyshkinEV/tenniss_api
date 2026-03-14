@@ -1,12 +1,18 @@
 import sys
 import joblib
 import pandas as pd
-from sqlalchemy import create_engine
+from src.db.engine import get_engine
+from config import settings
 
-engine = create_engine("postgresql://tennis_user:tennis_pass@localhost:5432/tennis")
-
-MODEL_PATH = "/opt/tennis_ai/models/match_winner/lightgbm_elo.joblib"
-model = joblib.load(MODEL_PATH)
+engine = get_engine()
+model_path = settings.model_path("lightgbm_elo.joblib")
+legacy_model_path = settings.project_root / "models" / "match_winner" / "lightgbm_elo.joblib"
+if model_path.exists():
+    model = joblib.load(model_path)
+elif legacy_model_path.exists():
+    model = joblib.load(legacy_model_path)
+else:
+    raise FileNotFoundError(f"Model not found: {model_path} or {legacy_model_path}")
 
 P1 = int(sys.argv[1])
 P2 = int(sys.argv[2])

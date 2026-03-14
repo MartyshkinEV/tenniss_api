@@ -1,7 +1,7 @@
 import os
 import joblib
 import pandas as pd
-from sqlalchemy import create_engine
+
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
@@ -9,9 +9,12 @@ from sklearn.metrics import accuracy_score, roc_auc_score, log_loss, brier_score
 from sklearn.preprocessing import OneHotEncoder
 from lightgbm import LGBMClassifier
 
-engine = create_engine("postgresql://tennis_user:tennis_pass@localhost:5432/tennis")
+from src.db.engine import get_engine
+from config import settings
 
-MODEL_DIR="/opt/tennis_ai/models/match_winner"
+engine = get_engine()
+
+MODEL_DIR=settings.models_dir
 os.makedirs(MODEL_DIR,exist_ok=True)
 
 print("Loading dataset...")

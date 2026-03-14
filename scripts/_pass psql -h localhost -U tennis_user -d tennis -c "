@@ -1,9 +1,0 @@
-     player_name      |         opponent_name          | is_win | surface | tourney_date 
-----------------------+--------------------------------+--------+---------+--------------
- Pedro Boscardin Dias | Bautista Vilicich              |      1 | Hard    | 2024-11-25
- Pedro Boscardin Dias | Paulo Andre Saraiva Dos Santos |      1 | Hard    | 2024-11-25
- Pedro Boscardin Dias | Gilbert Soares Klier Junior    |      0 | Hard    | 2024-11-25
- Pedro Boscardin Dias | Pedro Sakamoto                 |      0 | Hard    | 2024-11-18
- Pedro Boscardin Dias | Bruno Loch Varella             |      1 | Clay    | 2024-11-11
-(5 rows)
-

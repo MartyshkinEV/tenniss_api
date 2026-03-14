@@ -1,6 +1,7 @@
 # python
 __pycache__/
 *.pyc
+.pytest_cache/
 
 # virtualenv
 venv/
@@ -9,8 +10,10 @@ venv/
 # environment
 .env
 .env.*
+!.env.example
 
-# models
+# artifacts and models
+artifacts/
 models/*.pkl
 models/*.joblib
 
@@ -18,6 +21,7 @@ models/*.joblib
 tennis_atp/
 tennis_pointbypoint/
 tennis_slam_pointbypoint/
+data/
 
 # logs
 *.log
