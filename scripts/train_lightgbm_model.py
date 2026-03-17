@@ -1,5 +1,9 @@
+try:
+    import _bootstrap
+except ModuleNotFoundError:
+    from scripts import _bootstrap
+
 import joblib
-import pandas as pd
 from lightgbm import LGBMClassifier
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
@@ -8,45 +12,25 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
 
 from config import settings
-from src.db.engine import get_engine
-
-engine = get_engine()
+from src.data import BASELINE_FEATURES, CATEGORICAL_FEATURES
+from src.data.pipeline import load_match_features, split_dataset
 
 
 def main():
-    query = """
-    SELECT *
-    FROM match_features
-    WHERE label IS NOT NULL
-      AND tourney_date IS NOT NULL
-    ORDER BY tourney_date
-    """
-    df = pd.read_sql(query, engine)
-    df["tourney_date"] = pd.to_datetime(df["tourney_date"])
+    df = load_match_features()
+    splits = split_dataset(df)
+    train_df = splits["train"]
+    valid_df = splits["valid"]
+    test_df = splits["test"]
 
-    train_df = df[df["tourney_date"] < "2022-01-01"].copy()
-    valid_df = df[(df["tourney_date"] >= "2022-01-01") & (df["tourney_date"] < "2024-01-01")].copy()
-    test_df = df[df["tourney_date"] >= "2024-01-01"].copy()
-
-    candidate_features = [
-        "surface", "tourney_level", "round", "best_of", "minutes",
-        "p1_rank", "p2_rank", "p1_rank_points", "p2_rank_points",
-        "p1_winrate_last10", "p2_winrate_last10", "p1_winrate_surface", "p2_winrate_surface",
-        "p1_hold_rate", "p2_hold_rate", "p1_break_rate", "p2_break_rate",
-        "p1_recent_form", "p2_recent_form", "p1_matches_last7days", "p2_matches_last7days",
-        "rank_diff", "rank_points_diff", "winrate_last10_diff", "winrate_surface_diff",
-        "hold_rate_diff", "break_rate_diff", "recent_form_diff", "matches_last7days_diff",
-        "p1_h2h_wins", "p2_h2h_wins", "p1_h2h_surface", "p2_h2h_surface",
-    ]
-
-    features = [c for c in candidate_features if c in df.columns]
+    features = BASELINE_FEATURES
     target = "label"
 
     X_train, y_train = train_df[features], train_df[target]
     X_valid, y_valid = valid_df[features], valid_df[target]
     X_test, y_test = test_df[features], test_df[target]
 
-    categorical = [c for c in ["surface", "tourney_level", "round"] if c in features]
+    categorical = [c for c in CATEGORICAL_FEATURES if c in features]
     numeric = [c for c in features if c not in categorical]
 
     preprocessor = ColumnTransformer([

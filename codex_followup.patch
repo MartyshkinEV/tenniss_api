@@ -1,0 +1,1995 @@
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000000000000000000000000000000000000..f81508e67b2e2de37b98075a26dfef9c6f749c01
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,12 @@
++DB_HOST=localhost
++DB_PORT=5432
++DB_NAME=tennis
++DB_USER=tennis_user
++DB_PASSWORD=change_me
++
++PROJECT_ROOT=.
++DATA_DIR=./data
++ARTIFACTS_DIR=./artifacts
++MODELS_DIR=./artifacts/models
++SQL_DIR=./sql
++LOG_LEVEL=INFO
+diff --git a/.gitignore b/.gitignore
+index 50562bebd8a6aad0e5453f6a9f9448f8faead66a..99c753b560b4a626f74a96e9615ec53461fd517b 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -1,28 +1,32 @@
+ # python
+ __pycache__/
+ *.pyc
++.pytest_cache/
+ 
+ # virtualenv
+ venv/
+ .venv/
+ 
+ # environment
+ .env
+ .env.*
++!.env.example
+ 
+-# models
++# artifacts and models
++artifacts/
+ models/*.pkl
+ models/*.joblib
+ 
+ # datasets
+ tennis_atp/
+ tennis_pointbypoint/
+ tennis_slam_pointbypoint/
++data/
+ 
+ # logs
+ *.log
+ 
+ # system
+ .DS_Store
+ .vscode/
+ .idea/
+diff --git a/README.md b/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..6f59e149975af8fb69331f6b3e085f6f94cc7ffe
+--- /dev/null
++++ b/README.md
+@@ -0,0 +1,128 @@
++# tenniss_api
++
++ML/SQL-пайплайн для прогнозирования теннисных матчей (ATP) на PostgreSQL.
++
++## Что есть сейчас
++- загрузка ATP-данных в PostgreSQL;
++- построение табличных фичей (`match_features`, `match_features_elo`);
++- обучение baseline моделей (logreg/lightgbm);
++- инференс и запись предсказаний в таблицу.
++
++## Структура проекта
++```text
++tenniss_api/
++├── README.md
++├── requirements.txt
++├── .env.example
++├── .gitignore
++├── config.py
++├── scripts/
++├── sql/
++├── src/
++│   ├── db/
++│   ├── features/
++│   ├── models/
++│   ├── training/
++│   ├── inference/
++│   └── utils/
++├── tests/
++└── artifacts/
++```
++
++## Требования
++- Python 3.10+
++- PostgreSQL
++
++## Быстрый старт
++1. Создать окружение:
++```bash
++python -m venv .venv
++source .venv/bin/activate
++```
++
++2. Установить зависимости:
++```bash
++pip install -r requirements.txt
++```
++
++3. Создать `.env`:
++```bash
++cp .env.example .env
++```
++
++4. Инициализировать БД:
++```bash
++psql -h "$DB_HOST" -U "$DB_USER" -d "$DB_NAME" -f sql/init.sql
++psql -h "$DB_HOST" -U "$DB_USER" -d "$DB_NAME" -f sql/player_match_stats.sql
++```
++
++5. Загрузить ATP-данные (CSV должны лежать в `DATA_DIR`):
++```bash
++python scripts/load_atp.py
++```
++
++6. Построить фичи:
++```bash
++python scripts/build_match_features.py
++python scripts/build_elo_features.py
++```
++
++7. Обучить модель:
++```bash
++python scripts/train_match_model.py
++python scripts/train_lightgbm_model.py
++python scripts/train_lightgbm_elo_model.py
++```
++
++8. Сделать batch-predict (без `PYTHONPATH=.`):
++```bash
++python scripts/predict_match_model.py
++```
++
++9. Сделать point-predict для пары игроков (без `PYTHONPATH=.`):
++```bash
++python scripts/predict_match.py <P1_ID> <P2_ID>
++# пример:
++python scripts/predict_match.py 106168 210000
++```
++
++10. Прямой запуск train-скриптов (без `PYTHONPATH=.`):
++```bash
++python scripts/train_match_model.py
++python scripts/train_lightgbm_model.py
++python scripts/train_lightgbm_elo_model.py
++```
++
++## Конфигурация
++Все пути и подключение к БД задаются через `config.py` + переменные окружения.
++
++Ключевые переменные:
++- `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`
++- `PROJECT_ROOT`, `DATA_DIR`, `ARTIFACTS_DIR`, `MODELS_DIR`, `SQL_DIR`
++- `LOG_LEVEL`
++
++## Где лежат артефакты
++- Основной путь: `artifacts/models/` (через `MODELS_DIR`).
++- Для обратной совместимости в части скриптов оставлен fallback чтения из `models/match_winner/`.
++
++## Назначение текущих скриптов
++- `scripts/load_atp.py` — загрузка players/rankings/matches.
++- `scripts/load_matches_only.py` — загрузка только matches.
++- `scripts/build_match_features.py` — формирование `match_features`.
++- `scripts/build_elo_features.py` — добавление ELO-фичей (`match_features_elo`).
++- `scripts/train_match_model.py` — обучение logistic baseline.
++- `scripts/train_lightgbm_model.py` — обучение lightgbm baseline.
++- `scripts/train_lightgbm_elo_model.py` — обучение lightgbm с ELO.
++- `scripts/predict_match_model.py` — пакетный предикт в `match_predictions`.
++- `scripts/predict_match.py` — предикт для конкретной пары игроков.
++
++## Что пока осталось в `scripts/`
++Это намеренно: текущая логика оставлена с thin-refactor для сохранения работоспособности пайплайна.
++Новая архитектурная точка расширения добавлена в `src/` (models/features/training/inference).
++
++## TODO следующей итерации
++- Единый dataset builder и единый train/eval pipeline в `src/`.
++- Time-based split как общий компонент.
++- Подключение xgboost/catboost через опциональные зависимости.
++- Модельный registry/metadata.
++- Поддержка WTA.
+diff --git a/config.py b/config.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..49d027af62aa1b22fcded09a17c14a3b813419e5
+--- /dev/null
++++ b/config.py
+@@ -0,0 +1,98 @@
++from __future__ import annotations
++
++import os
++from dataclasses import dataclass
++from pathlib import Path
++from typing import Dict
++
++
++def _load_dotenv_file(dotenv_path: Path) -> Dict[str, str]:
++    if not dotenv_path.exists():
++        return {}
++
++    loaded: Dict[str, str] = {}
++    for raw_line in dotenv_path.read_text(encoding="utf-8").splitlines():
++        line = raw_line.strip()
++        if not line or line.startswith("#") or "=" not in line:
++            continue
++        key, value = line.split("=", 1)
++        loaded[key.strip()] = value.strip().strip('"').strip("'")
++    return loaded
++
++
++def _get_env(name: str, default: str, dotenv_values: Dict[str, str]) -> str:
++    if name in os.environ:
++        return os.environ[name]
++    if name in dotenv_values:
++        return dotenv_values[name]
++    return default
++
++
++@dataclass(frozen=True)
++class Settings:
++    project_root: Path
++    data_dir: Path
++    artifacts_dir: Path
++    models_dir: Path
++    sql_dir: Path
++    db_host: str
++    db_port: int
++    db_name: str
++    db_user: str
++    db_password: str
++    log_level: str
++
++    @property
++    def db_url(self) -> str:
++        return (
++            f"postgresql://{self.db_user}:{self.db_password}@"
++            f"{self.db_host}:{self.db_port}/{self.db_name}"
++        )
++
++    def model_path(self, model_name: str) -> Path:
++        return self.models_dir / model_name
++
++
++def load_settings() -> Settings:
++    project_root = Path(__file__).resolve().parent
++    dotenv_values = _load_dotenv_file(project_root / ".env")
++
++    resolved_root = Path(_get_env("PROJECT_ROOT", str(project_root), dotenv_values)).resolve()
++    artifacts_dir = Path(_get_env("ARTIFACTS_DIR", str(resolved_root / "artifacts"), dotenv_values)).resolve()
++    models_dir = Path(_get_env("MODELS_DIR", str(artifacts_dir / "models"), dotenv_values)).resolve()
++    data_dir = Path(_get_env("DATA_DIR", str(resolved_root / "data"), dotenv_values)).resolve()
++    sql_dir = Path(_get_env("SQL_DIR", str(resolved_root / "sql"), dotenv_values)).resolve()
++
++    settings = Settings(
++        project_root=resolved_root,
++        data_dir=data_dir,
++        artifacts_dir=artifacts_dir,
++        models_dir=models_dir,
++        sql_dir=sql_dir,
++        db_host=_get_env("DB_HOST", "localhost", dotenv_values),
++        db_port=int(_get_env("DB_PORT", "5432", dotenv_values)),
++        db_name=_get_env("DB_NAME", "tennis", dotenv_values),
++        db_user=_get_env("DB_USER", "tennis_user", dotenv_values),
++        db_password=_get_env("DB_PASSWORD", "tennis_pass", dotenv_values),
++        log_level=_get_env("LOG_LEVEL", "INFO", dotenv_values),
++    )
++
++    settings.artifacts_dir.mkdir(parents=True, exist_ok=True)
++    settings.models_dir.mkdir(parents=True, exist_ok=True)
++    return settings
++
++
++settings = load_settings()
++
++
++def resolve_model_artifact_path(model_name: str, must_exist: bool = True) -> Path:
++    primary = settings.model_path(model_name)
++    legacy = settings.project_root / "models" / "match_winner" / model_name
++
++    if primary.exists():
++        return primary
++    if legacy.exists():
++        return legacy
++    if must_exist:
++        raise FileNotFoundError(f"Model not found: {primary} or legacy fallback {legacy}")
++    return primary
+diff --git a/pytest.ini b/pytest.ini
+new file mode 100644
+index 0000000000000000000000000000000000000000..5ee6477165727539aa0701c22b47da2ceaedeff5
+--- /dev/null
++++ b/pytest.ini
+@@ -0,0 +1,2 @@
++[pytest]
++testpaths = tests
+diff --git a/requirements.txt b/requirements.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..27c2e51e5623a7b74e75c2e49c14468b1d1327f8
+--- /dev/null
++++ b/requirements.txt
+@@ -0,0 +1,8 @@
++pandas
++numpy
++SQLAlchemy
++psycopg2-binary
++scikit-learn
++lightgbm
++joblib
++pytest
+diff --git a/scripts/_bootstrap.py b/scripts/_bootstrap.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..318593bc7f5275cb2df5fab39979ff2f223e5daf
+--- /dev/null
++++ b/scripts/_bootstrap.py
+@@ -0,0 +1,12 @@
++"""Bootstrap helper for running legacy scripts directly.
++
++Allows `python scripts/<script>.py` without setting PYTHONPATH.
++"""
++
++from pathlib import Path
++import sys
++
++
++PROJECT_ROOT = Path(__file__).resolve().parents[1]
++if str(PROJECT_ROOT) not in sys.path:
++    sys.path.insert(0, str(PROJECT_ROOT))
+diff --git "a/scripts/_pass psql -h localhost -U tennis_user -d tennis -c \"" "b/scripts/_pass psql -h localhost -U tennis_user -d tennis -c \""
+deleted file mode 100644
+index af4477b65dec21e70bc10eb2a25da8007aba4c98..0000000000000000000000000000000000000000
+--- "a/scripts/_pass psql -h localhost -U tennis_user -d tennis -c \""	
++++ /dev/null
+@@ -1,9 +0,0 @@
+-     player_name      |         opponent_name          | is_win | surface | tourney_date 
+-----------------------+--------------------------------+--------+---------+--------------
+- Pedro Boscardin Dias | Bautista Vilicich              |      1 | Hard    | 2024-11-25
+- Pedro Boscardin Dias | Paulo Andre Saraiva Dos Santos |      1 | Hard    | 2024-11-25
+- Pedro Boscardin Dias | Gilbert Soares Klier Junior    |      0 | Hard    | 2024-11-25
+- Pedro Boscardin Dias | Pedro Sakamoto                 |      0 | Hard    | 2024-11-18
+- Pedro Boscardin Dias | Bruno Loch Varella             |      1 | Clay    | 2024-11-11
+-(5 rows)
+-
+diff --git a/scripts/build_elo_features.py b/scripts/build_elo_features.py
+index 3d9093d767de3b1ececaa77dcca914cac7de0148..79ea9241e6dfb7982e2c8b75730ade7702a73ed9 100644
+--- a/scripts/build_elo_features.py
++++ b/scripts/build_elo_features.py
+@@ -1,31 +1,35 @@
++import _bootstrap
++
+ import numpy as np
+ import pandas as pd
+-from sqlalchemy import create_engine, text
++from sqlalchemy import text
++
++from src.db.engine import get_engine
++from config import settings
+ 
+-DB_URL = "postgresql://tennis_user:tennis_pass@localhost:5432/tennis"
+-engine = create_engine(DB_URL)
++engine = get_engine()
+ 
+ 
+ BASE_ELO = 1500.0
+ K_FACTOR = 32.0
+ 
+ 
+ def expected_score(ra, rb):
+     return 1.0 / (1.0 + 10 ** ((rb - ra) / 400.0))
+ 
+ 
+ def update_elo(ra, rb, score_a, k=K_FACTOR):
+     ea = expected_score(ra, rb)
+     eb = expected_score(rb, ra)
+     new_ra = ra + k * (score_a - ea)
+     new_rb = rb + k * ((1.0 - score_a) - eb)
+     return new_ra, new_rb
+ 
+ 
+ def main():
+     query = """
+     SELECT
+         match_id,
+         tourney_date,
+         surface,
+         p1_id,
+diff --git a/scripts/build_match_features.py b/scripts/build_match_features.py
+index f9000b199e4a58b8a47f98b194d48528ed51638a..2dd1ec7724c0530ff86fd77dd62b38687566c55c 100644
+--- a/scripts/build_match_features.py
++++ b/scripts/build_match_features.py
+@@ -1,233 +1,78 @@
+-import numpy as np
+-import pandas as pd
+-from sqlalchemy import create_engine, text
+-
+-DB_URL = "postgresql://tennis_user:tennis_pass@localhost:5432/tennis"
+-
+-engine = create_engine(DB_URL)
+-
+-
+-def safe_div(a, b):
+-    a = pd.to_numeric(a, errors="coerce")
+-    b = pd.to_numeric(b, errors="coerce")
+-    return np.where((b.notna()) & (b != 0), a / b, np.nan)
+-
+-
+-def compute_player_rolling_features(df: pd.DataFrame) -> pd.DataFrame:
+-    df = df.copy()
+-    df = df.sort_values(["player_id", "tourney_date", "match_id"]).reset_index(drop=True)
+-
+-    # базовые матчевые метрики
+-    df["hold_rate_match"] = safe_div(df["service_games"] - (df["bp_faced"] - df["bp_saved"]), df["service_games"])
+-    df["break_rate_match"] = safe_div(df["opp_bp_faced"] - df["opp_bp_saved"], df["opp_service_games"])
+-
+-    # last10 winrate
+-    df["p_win_shift"] = df.groupby("player_id")["is_win"].shift(1)
+-    df["winrate_last10"] = (
+-        df.groupby("player_id")["p_win_shift"]
+-        .transform(lambda s: s.rolling(10, min_periods=1).mean())
+-    )
+-
+-    # общие rolling метрики подачи/брейка
+-    df["hold_rate_shift"] = df.groupby("player_id")["hold_rate_match"].shift(1)
+-    df["break_rate_shift"] = df.groupby("player_id")["break_rate_match"].shift(1)
+-
+-    df["hold_rate"] = (
+-        df.groupby("player_id")["hold_rate_shift"]
+-        .transform(lambda s: s.rolling(20, min_periods=3).mean())
+-    )
+-
+-    df["break_rate"] = (
+-        df.groupby("player_id")["break_rate_shift"]
+-        .transform(lambda s: s.rolling(20, min_periods=3).mean())
+-    )
+-
+-    # surface-specific winrate
+-    df["surface_win_shift"] = df.groupby(["player_id", "surface"])["is_win"].shift(1)
+-    df["winrate_surface"] = (
+-        df.groupby(["player_id", "surface"])["surface_win_shift"]
+-        .transform(lambda s: s.expanding(min_periods=1).mean())
+-    )
+-
+-    # матчи за последние 7 дней
+-    df["matches_last7days"] = 0
+-
+-    for player_id, idx in df.groupby("player_id").groups.items():
+-        idx = list(idx)
+-        dates = df.loc[idx, "tourney_date"].values.astype("datetime64[D]")
+-        counts = np.zeros(len(idx), dtype=int)
+-
+-        left = 0
+-        for right in range(len(idx)):
+-            while dates[right] - dates[left] > np.timedelta64(7, "D"):
+-                left += 1
+-            counts[right] = right - left  # до текущего матча, без него самого
+-        df.loc[idx, "matches_last7days"] = counts
+-
+-    return df
+-
+-
+-def build_h2h_features(match_df: pd.DataFrame) -> pd.DataFrame:
+-    match_df = match_df.sort_values(["tourney_date", "match_id"]).reset_index(drop=True)
+-
+-    h2h_counts = {}
+-    p1_h2h_wins = []
+-    p2_h2h_wins = []
+-
+-    for _, row in match_df.iterrows():
+-        p1 = int(row["p1_id"])
+-        p2 = int(row["p2_id"])
++import _bootstrap
+ 
+-        key = tuple(sorted((p1, p2)))
+-        rec = h2h_counts.get(key, {p1: 0, p2: 0})
+-
+-        p1_h2h_wins.append(rec.get(p1, 0))
+-        p2_h2h_wins.append(rec.get(p2, 0))
+-
+-        if row["label"] == 1:
+-            rec[p1] = rec.get(p1, 0) + 1
+-        else:
+-            rec[p2] = rec.get(p2, 0) + 1
++import pandas as pd
++from sqlalchemy import text
+ 
+-        h2h_counts[key] = rec
++from config import settings
++from src.db.engine import get_engine
++from src.features.feature_builder import build_match_features
+ 
+-    match_df["p1_h2h_wins"] = p1_h2h_wins
+-    match_df["p2_h2h_wins"] = p2_h2h_wins
+-    return match_df
++engine = get_engine()
+ 
+ 
+ def main():
+     print("Loading player_match_stats...")
+     query = """
+     SELECT
+         match_id,
+         player_id,
+         player_name,
+         opponent_id,
+         opponent_name,
+         is_win,
+         surface,
+         tourney_date,
+         tourney_level,
+         round,
+         best_of,
+         minutes,
+         player_rank,
+         player_rank_points,
+         opponent_rank,
+         opponent_rank_points,
+         ace,
+         df,
+         svpt,
+         first_in,
+         first_won,
+         second_won,
+         service_games,
+         bp_saved,
+         bp_faced,
+         opp_ace,
+         opp_df,
+         opp_svpt,
+         opp_first_in,
+         opp_first_won,
+         opp_second_won,
+         opp_service_games,
+         opp_bp_saved,
+         opp_bp_faced
+     FROM player_match_stats
+     WHERE player_id IS NOT NULL
+       AND opponent_id IS NOT NULL
+       AND tourney_date IS NOT NULL
+     ORDER BY tourney_date, match_id, player_id
+     """
+     df = pd.read_sql(query, engine)
+     df["tourney_date"] = pd.to_datetime(df["tourney_date"])
+ 
+     print(f"Loaded rows: {len(df):,}")
+-
+-    # rolling features per player
+-    print("Computing rolling player features...")
+-    df = compute_player_rolling_features(df)
+-
+-    # соберем матч из двух строк player_match_stats
+-    print("Building one-row-per-match dataset...")
+-    counts = df.groupby("match_id").size()
+-    valid_match_ids = counts[counts == 2].index
+-
+-    df2 = df[df["match_id"].isin(valid_match_ids)].copy()
+-    df2 = df2.sort_values(["match_id", "player_id"]).reset_index(drop=True)
+-
+-    p1 = df2.groupby("match_id").nth(0).reset_index()
+-    p2 = df2.groupby("match_id").nth(1).reset_index()
+-
+-    match_df = pd.DataFrame({
+-        "match_id": p1["match_id"],
+-        "tourney_date": p1["tourney_date"],
+-        "surface": p1["surface"],
+-        "tourney_level": p1["tourney_level"],
+-        "round": p1["round"],
+-        "best_of": p1["best_of"],
+-
+-        "p1_id": p1["player_id"],
+-        "p1_name": p1["player_name"],
+-        "p2_id": p2["player_id"],
+-        "p2_name": p2["player_name"],
+-
+-        "p1_rank": p1["player_rank"],
+-        "p2_rank": p2["player_rank"],
+-        "p1_rank_points": p1["player_rank_points"],
+-        "p2_rank_points": p2["player_rank_points"],
+-
+-        "p1_winrate_last10": p1["winrate_last10"],
+-        "p2_winrate_last10": p2["winrate_last10"],
+-
+-        "p1_winrate_surface": p1["winrate_surface"],
+-        "p2_winrate_surface": p2["winrate_surface"],
+-
+-        "p1_hold_rate": p1["hold_rate"],
+-        "p2_hold_rate": p2["hold_rate"],
+-
+-        "p1_break_rate": p1["break_rate"],
+-        "p2_break_rate": p2["break_rate"],
+-
+-        "p1_matches_last7days": p1["matches_last7days"],
+-        "p2_matches_last7days": p2["matches_last7days"],
+-
+-        # если первая строка player-centric была победителем => p1_win=1
+-        "label": p1["is_win"].astype(int),
+-    })
+-
+-    # разницы
+-    match_df["rank_diff"] = match_df["p1_rank"] - match_df["p2_rank"]
+-    match_df["rank_points_diff"] = match_df["p1_rank_points"] - match_df["p2_rank_points"]
+-    match_df["winrate_last10_diff"] = match_df["p1_winrate_last10"] - match_df["p2_winrate_last10"]
+-    match_df["winrate_surface_diff"] = match_df["p1_winrate_surface"] - match_df["p2_winrate_surface"]
+-    match_df["hold_rate_diff"] = match_df["p1_hold_rate"] - match_df["p2_hold_rate"]
+-    match_df["break_rate_diff"] = match_df["p1_break_rate"] - match_df["p2_break_rate"]
+-    match_df["matches_last7days_diff"] = match_df["p1_matches_last7days"] - match_df["p2_matches_last7days"]
+-
+-    # H2H
+-    print("Computing H2H...")
+-    match_df = build_h2h_features(match_df)
+-
+-    # очистка явных дублей
+-    match_df = match_df.drop_duplicates(subset=["match_id"]).copy()
++    match_df = build_match_features(df)
+ 
+     print(f"Final match_features rows: {len(match_df):,}")
+-
+-    # сохраняем как таблицу
+     print("Writing to PostgreSQL...")
+     match_df.to_sql("match_features", engine, if_exists="replace", index=False, method="multi", chunksize=10000)
+ 
+     with engine.begin() as conn:
+         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_match_features_date ON match_features (tourney_date)"))
+         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_match_features_match_id ON match_features (match_id)"))
+         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_match_features_surface ON match_features (surface)"))
+         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_match_features_level ON match_features (tourney_level)"))
+         conn.execute(text("ANALYZE match_features"))
+ 
+-    print("Done.")
++    print(f"Done. SQL dir configured: {settings.sql_dir}")
+ 
+ 
+ if __name__ == "__main__":
+     main()
+diff --git a/scripts/load_atp.py b/scripts/load_atp.py
+index ebfedbb1ab83f69ce16991ed898099334099cff5..3c979bdb4c0b833b1024b6e56e9b8b14f9218dab 100644
+--- a/scripts/load_atp.py
++++ b/scripts/load_atp.py
+@@ -1,217 +1,176 @@
++import _bootstrap
++
+ from pathlib import Path
++
+ import pandas as pd
+-from sqlalchemy import create_engine, text
++from sqlalchemy import text
+ 
+-DB_URL = "postgresql+psycopg2://tennis_user:tennis_pass@localhost:5432/tennis"
+-engine = create_engine(DB_URL)
++from config import settings
++from src.db.engine import get_engine
+ 
+-ROOT = Path("/opt/tennis_ai/tennis_atp")
++engine = get_engine()
++ROOT = settings.data_dir
+ 
+ INT_COLS_MATCHES = [
+     "draw_size", "match_num", "best_of", "minutes",
+-    "winner_id", "winner_ht",
+-    "loser_id", "loser_ht",
+-    "winner_rank", "winner_rank_points",
+-    "loser_rank", "loser_rank_points",
++    "winner_id", "winner_ht", "loser_id", "loser_ht",
++    "winner_rank", "winner_rank_points", "loser_rank", "loser_rank_points",
+     "w_ace", "w_df", "w_svpt", "w_1stin", "w_1stwon", "w_2ndwon", "w_svgms", "w_bpsaved", "w_bpfaced",
+     "l_ace", "l_df", "l_svpt", "l_1stin", "l_1stwon", "l_2ndwon", "l_svgms", "l_bpsaved", "l_bpfaced",
+ ]
++FLOAT_COLS_MATCHES = ["winner_age", "loser_age"]
+ 
+-FLOAT_COLS_MATCHES = [
+-    "winner_age", "loser_age",
+-]
+ 
+ def load_players():
+     path = ROOT / "atp_players.csv"
+     df = pd.read_csv(path, low_memory=False)
+-
+     cols = {c.lower(): c for c in df.columns}
+ 
+     player_id_col = cols.get("player_id")
+     first_name_col = cols.get("first_name") or cols.get("name_first")
+     last_name_col = cols.get("last_name") or cols.get("name_last")
+     hand_col = cols.get("hand")
+     country_col = cols.get("country_code") or cols.get("ioc")
+     height_col = cols.get("height") or cols.get("ht")
+     birth_col = cols.get("birth_date") or cols.get("dob") or cols.get("birthdate")
+ 
+     if not player_id_col:
+         raise ValueError(f"Не найдена колонка player_id. Есть: {list(df.columns)}")
+ 
+     out = pd.DataFrame()
+     out["player_id"] = pd.to_numeric(df[player_id_col], errors="coerce")
+     out["first_name"] = df[first_name_col] if first_name_col else None
+     out["last_name"] = df[last_name_col] if last_name_col else None
+     out["hand"] = df[hand_col] if hand_col else None
+     out["country_code"] = df[country_col] if country_col else None
+     out["height_cm"] = pd.to_numeric(df[height_col], errors="coerce") if height_col else None
+-
+-    if birth_col:
+-        out["birth_date"] = pd.to_datetime(df[birth_col], format="%Y%m%d", errors="coerce").dt.date
+-    else:
+-        out["birth_date"] = None
++    out["birth_date"] = pd.to_datetime(df[birth_col], format="%Y%m%d", errors="coerce").dt.date if birth_col else None
+ 
+     out = out.dropna(subset=["player_id"])
+     out["player_id"] = out["player_id"].astype("int64")
+     out["height_cm"] = pd.to_numeric(out["height_cm"], errors="coerce").astype("Int64")
+     out = out.drop_duplicates(subset=["player_id"])
+ 
+     with engine.begin() as conn:
+         conn.execute(text("TRUNCATE TABLE players"))
+     out.to_sql("players", engine, if_exists="append", index=False, method="multi", chunksize=5000)
+     print("players loaded:", len(out))
+ 
++
+ def load_rankings():
+     files = sorted(ROOT.glob("atp_rankings*.csv"))
+ 
+     with engine.begin() as conn:
+         conn.execute(text("DROP TABLE IF EXISTS rankings_stage"))
+-        conn.execute(text("""
+-            CREATE TABLE rankings_stage (
+-                ranking_date DATE,
+-                ranking INTEGER,
+-                player_id BIGINT,
+-                ranking_points INTEGER
+-            )
+-        """))
++        conn.execute(text("CREATE TABLE rankings_stage (ranking_date DATE, ranking INTEGER, player_id BIGINT, ranking_points INTEGER)"))
+         conn.execute(text("TRUNCATE TABLE rankings"))
+ 
+     total_stage = 0
+-
+     for path in files:
+         df = pd.read_csv(path, header=None, low_memory=False)
+         if df.shape[1] == 4:
+             df.columns = ["ranking_date", "ranking", "player_id", "ranking_points"]
+         elif df.shape[1] == 3:
+             df.columns = ["ranking_date", "ranking", "player_id"]
+             df["ranking_points"] = None
+         else:
+             print("skip rankings:", path.name, "unexpected cols:", df.shape[1])
+             continue
+ 
+         df["ranking_date"] = pd.to_datetime(df["ranking_date"], format="%Y%m%d", errors="coerce").dt.date
+         df["ranking"] = pd.to_numeric(df["ranking"], errors="coerce")
+         df["player_id"] = pd.to_numeric(df["player_id"], errors="coerce")
+         df["ranking_points"] = pd.to_numeric(df["ranking_points"], errors="coerce")
+ 
+         df = df.dropna(subset=["ranking_date", "ranking", "player_id"])
+         df["ranking"] = df["ranking"].astype("int64")
+         df["player_id"] = df["player_id"].astype("int64")
+         df["ranking_points"] = df["ranking_points"].astype("Int64")
+ 
+         df.to_sql("rankings_stage", engine, if_exists="append", index=False, method="multi", chunksize=10000)
+         total_stage += len(df)
+         print("rankings stage:", path.name, len(df))
+ 
+     with engine.begin() as conn:
+         conn.execute(text("""
+             INSERT INTO rankings (ranking_date, ranking, player_id, ranking_points)
+             SELECT DISTINCT ranking_date, ranking, player_id, ranking_points
+             FROM rankings_stage
+             ON CONFLICT (ranking_date, player_id) DO NOTHING
+         """))
+         conn.execute(text("DROP TABLE IF EXISTS rankings_stage"))
+ 
+     print("rankings staged total:", total_stage)
+     with engine.begin() as conn:
+-        final_count = conn.execute(text("SELECT COUNT(*) FROM rankings")).scalar()
+-    print("rankings final:", final_count)
++        print("rankings final:", conn.execute(text("SELECT COUNT(*) FROM rankings")).scalar())
++
+ 
+ def normalize_matches(df: pd.DataFrame, path: Path) -> pd.DataFrame:
+     df = df.copy()
+     df["source_file"] = path.name
+-
+     if "qual_chall" in path.name:
+         df["level_group"] = "qual_chall"
+     elif "futures" in path.name:
+         df["level_group"] = "futures"
+     else:
+         df["level_group"] = "tour"
+ 
+-    if "tourney_date" in df.columns:
+-        df["tourney_date"] = pd.to_datetime(df["tourney_date"], format="%Y%m%d", errors="coerce").dt.date
+-    else:
+-        df["tourney_date"] = None
++    df["tourney_date"] = pd.to_datetime(df.get("tourney_date"), format="%Y%m%d", errors="coerce").dt.date
+ 
+     wanted = [
+-        "source_file", "level_group",
+-        "tourney_id", "tourney_name", "surface", "draw_size", "tourney_level", "tourney_date",
+-        "match_num", "best_of", "round", "minutes",
+-        "winner_id", "winner_name", "winner_hand", "winner_ht", "winner_ioc", "winner_age",
+-        "loser_id", "loser_name", "loser_hand", "loser_ht", "loser_ioc", "loser_age",
+-        "winner_rank", "winner_rank_points", "loser_rank", "loser_rank_points",
+-        "score",
+-        "w_ace", "w_df", "w_svpt", "w_1stIn", "w_1stWon", "w_2ndWon", "w_SvGms", "w_bpSaved", "w_bpFaced",
+-        "l_ace", "l_df", "l_svpt", "l_1stIn", "l_1stWon", "l_2ndWon", "l_SvGms", "l_bpSaved", "l_bpFaced",
++        "source_file", "level_group", "tourney_id", "tourney_name", "surface", "draw_size", "tourney_level", "tourney_date",
++        "match_num", "best_of", "round", "minutes", "winner_id", "winner_name", "winner_hand", "winner_ht", "winner_ioc",
++        "winner_age", "loser_id", "loser_name", "loser_hand", "loser_ht", "loser_ioc", "loser_age", "winner_rank",
++        "winner_rank_points", "loser_rank", "loser_rank_points", "score", "w_ace", "w_df", "w_svpt", "w_1stIn", "w_1stWon",
++        "w_2ndWon", "w_SvGms", "w_bpSaved", "w_bpFaced", "l_ace", "l_df", "l_svpt", "l_1stIn", "l_1stWon", "l_2ndWon",
++        "l_SvGms", "l_bpSaved", "l_bpFaced",
+     ]
+-
+     for col in wanted:
+         if col not in df.columns:
+             df[col] = None
+ 
+     out = df[wanted].rename(columns={
+-        "w_1stIn": "w_1stin",
+-        "w_1stWon": "w_1stwon",
+-        "w_2ndWon": "w_2ndwon",
+-        "w_SvGms": "w_svgms",
+-        "w_bpSaved": "w_bpsaved",
+-        "w_bpFaced": "w_bpfaced",
+-        "l_1stIn": "l_1stin",
+-        "l_1stWon": "l_1stwon",
+-        "l_2ndWon": "l_2ndwon",
+-        "l_SvGms": "l_svgms",
+-        "l_bpSaved": "l_bpsaved",
+-        "l_bpFaced": "l_bpfaced",
++        "w_1stIn": "w_1stin", "w_1stWon": "w_1stwon", "w_2ndWon": "w_2ndwon", "w_SvGms": "w_svgms",
++        "w_bpSaved": "w_bpsaved", "w_bpFaced": "w_bpfaced", "l_1stIn": "l_1stin", "l_1stWon": "l_1stwon",
++        "l_2ndWon": "l_2ndwon", "l_SvGms": "l_svgms", "l_bpSaved": "l_bpsaved", "l_bpFaced": "l_bpfaced",
+     })
+ 
+     for col in INT_COLS_MATCHES:
+         if col in out.columns:
+             out[col] = pd.to_numeric(out[col], errors="coerce").astype("Int64")
+-
+     for col in FLOAT_COLS_MATCHES:
+         if col in out.columns:
+             out[col] = pd.to_numeric(out[col], errors="coerce")
+ 
+     text_cols = [c for c in out.columns if c not in INT_COLS_MATCHES + FLOAT_COLS_MATCHES + ["tourney_date"]]
+     for col in text_cols:
+         out[col] = out[col].where(out[col].notna(), None)
+-
+     return out
+ 
++
+ def load_matches():
+     files = sorted(ROOT.glob("atp_matches_*.csv"))
+     total = 0
+-
+     with engine.begin() as conn:
+         conn.execute(text("TRUNCATE TABLE matches"))
+ 
+     for path in files:
+         if "doubles" in path.name or "amateur" in path.name:
+             continue
+-
+         print("loading matches file:", path.name)
+-        df = pd.read_csv(path, low_memory=False)
+-        df = normalize_matches(df, path)
+-
+-        try:
+-            df.to_sql("matches", engine, if_exists="append", index=False, method="multi", chunksize=2000)
+-        except Exception:
+-            print(f"FAILED file: {path.name}")
+-            bad_path = ROOT / f"FAILED_{path.name}"
+-            df.to_csv(bad_path, index=False)
+-            print(f"saved failed dataframe to: {bad_path}")
+-            raise
+-
++        df = normalize_matches(pd.read_csv(path, low_memory=False), path)
++        df.to_sql("matches", engine, if_exists="append", index=False, method="multi", chunksize=2000)
+         total += len(df)
+         print("matches:", path.name, len(df))
+ 
+     print("matches total:", total)
+ 
++
+ if __name__ == "__main__":
+     print("load players")
+     load_players()
+     print("load rankings")
+     load_rankings()
+     print("load matches")
+     load_matches()
+     print("done")
+diff --git a/scripts/load_matches_only.py b/scripts/load_matches_only.py
+index e2bad6846deb3259ee7b5d3968334faca9f58c68..86478b47007c7b86d3f775d4a129cc465f73bbcc 100644
+--- a/scripts/load_matches_only.py
++++ b/scripts/load_matches_only.py
+@@ -1,4 +1,6 @@
++import _bootstrap
++
+ from load_atp import load_matches
+ 
+ if __name__ == "__main__":
+     load_matches()
+diff --git a/scripts/predict_match.py b/scripts/predict_match.py
+index f771ae86fe5de4a632688ce1eb85ff3a2e352e17..bb5ba67669ae3cc38c5b714786ca6e763a011833 100644
+--- a/scripts/predict_match.py
++++ b/scripts/predict_match.py
+@@ -1,34 +1,35 @@
++import _bootstrap
++
+ import sys
+ import joblib
+ import pandas as pd
+-from sqlalchemy import create_engine
+-
+-engine = create_engine("postgresql://tennis_user:tennis_pass@localhost:5432/tennis")
++from src.db.engine import get_engine
++from config import resolve_model_artifact_path
+ 
+-MODEL_PATH = "/opt/tennis_ai/models/match_winner/lightgbm_elo.joblib"
+-model = joblib.load(MODEL_PATH)
++engine = get_engine()
++model = joblib.load(resolve_model_artifact_path("lightgbm_elo.joblib"))
+ 
+ P1 = int(sys.argv[1])
+ P2 = int(sys.argv[2])
+ 
+ SURFACE = "Clay"
+ TOURNEY_LEVEL = "challenger"
+ ROUND = "R32"
+ BEST_OF = 3
+ 
+ 
+ def player_stats(pid: int):
+     q = f"""
+     SELECT *
+     FROM player_match_stats
+     WHERE player_id = {pid}
+       AND tourney_date IS NOT NULL
+     ORDER BY tourney_date DESC, match_id DESC
+     LIMIT 50
+     """
+     df = pd.read_sql(q, engine)
+ 
+     if len(df) == 0:
+         raise Exception(f"No matches for player {pid}")
+ 
+     df["tourney_date"] = pd.to_datetime(df["tourney_date"])
+diff --git a/scripts/predict_match_model.py b/scripts/predict_match_model.py
+index 4bfc531e9e1be0cef8f874fd1ebb7a0c01aeca49..4d30fa7f0aee67b5372c03519f2595b39d024387 100644
+--- a/scripts/predict_match_model.py
++++ b/scripts/predict_match_model.py
+@@ -1,114 +1,62 @@
++import _bootstrap
++
+ import os
++
+ import joblib
+ import pandas as pd
+-from sqlalchemy import create_engine, text
+-
+-DB_URL = "postgresql://tennis_user:tennis_pass@localhost:5432/tennis"
+-engine = create_engine(DB_URL)
+-
+-MODEL_PATH = "/opt/tennis_ai/models/match_winner/logreg_baseline.joblib"
++from sqlalchemy import text
+ 
++from config import resolve_model_artifact_path
++from src.db.engine import get_engine
+ 
++engine = get_engine()
+ def main():
+-    if not os.path.exists(MODEL_PATH):
+-        raise FileNotFoundError(f"Model not found: {MODEL_PATH}")
+-
+-    model = joblib.load(MODEL_PATH)
++    model = joblib.load(resolve_model_artifact_path("logreg_baseline.joblib"))
+ 
+     query = """
+     SELECT *
+     FROM match_features
+     WHERE label IS NOT NULL
+       AND tourney_date IS NOT NULL
+     ORDER BY tourney_date
+     """
+     df = pd.read_sql(query, engine)
+     df["tourney_date"] = pd.to_datetime(df["tourney_date"])
+ 
+     candidate_features = [
+-        "surface",
+-        "tourney_level",
+-        "round",
+-        "best_of",
+-        "minutes",
+-        "p1_rank",
+-        "p2_rank",
+-        "p1_rank_points",
+-        "p2_rank_points",
+-        "p1_winrate_last10",
+-        "p2_winrate_last10",
+-        "p1_winrate_surface",
+-        "p2_winrate_surface",
+-        "p1_hold_rate",
+-        "p2_hold_rate",
+-        "p1_break_rate",
+-        "p2_break_rate",
+-        "p1_recent_form",
+-        "p2_recent_form",
+-        "p1_matches_last7days",
+-        "p2_matches_last7days",
+-        "rank_diff",
+-        "rank_points_diff",
+-        "winrate_last10_diff",
+-        "winrate_surface_diff",
+-        "hold_rate_diff",
+-        "break_rate_diff",
+-        "recent_form_diff",
+-        "matches_last7days_diff",
+-        "p1_h2h_wins",
+-        "p2_h2h_wins",
+-        "p1_h2h_surface",
+-        "p2_h2h_surface",
++        "surface", "tourney_level", "round", "best_of", "minutes", "p1_rank", "p2_rank",
++        "p1_rank_points", "p2_rank_points", "p1_winrate_last10", "p2_winrate_last10",
++        "p1_winrate_surface", "p2_winrate_surface", "p1_hold_rate", "p2_hold_rate",
++        "p1_break_rate", "p2_break_rate", "p1_recent_form", "p2_recent_form",
++        "p1_matches_last7days", "p2_matches_last7days", "rank_diff", "rank_points_diff",
++        "winrate_last10_diff", "winrate_surface_diff", "hold_rate_diff", "break_rate_diff",
++        "recent_form_diff", "matches_last7days_diff", "p1_h2h_wins", "p2_h2h_wins",
++        "p1_h2h_surface", "p2_h2h_surface",
+     ]
+ 
+     features = [c for c in candidate_features if c in df.columns]
+     X = df[features]
+ 
+     proba = model.predict_proba(X)[:, 1]
+     pred = (proba >= 0.5).astype(int)
+ 
+     out = pd.DataFrame({
+-        "match_id": df["match_id"],
+-        "tourney_date": df["tourney_date"],
+-        "surface": df["surface"],
+-        "tourney_level": df["tourney_level"],
+-        "round": df["round"],
+-        "p1_id": df["p1_id"],
+-        "p1_name": df["p1_name"],
+-        "p2_id": df["p2_id"],
+-        "p2_name": df["p2_name"],
+-        "actual_label": df["label"],
+-        "pred_proba": proba,
+-        "pred_label": pred,
+-        "model_name": "logreg_baseline",
++        "match_id": df["match_id"], "tourney_date": df["tourney_date"], "surface": df["surface"],
++        "tourney_level": df["tourney_level"], "round": df["round"], "p1_id": df["p1_id"],
++        "p1_name": df["p1_name"], "p2_id": df["p2_id"], "p2_name": df["p2_name"],
++        "actual_label": df["label"], "pred_proba": proba, "pred_label": pred, "model_name": "logreg_baseline",
+     })
+ 
+-    out.to_sql(
+-        "match_predictions",
+-        engine,
+-        if_exists="replace",
+-        index=False,
+-        chunksize=10000,
+-        method="multi"
+-    )
++    out.to_sql("match_predictions", engine, if_exists="replace", index=False, chunksize=10000, method="multi")
+ 
+     with engine.begin() as conn:
+-        conn.execute(text("""
+-            CREATE INDEX IF NOT EXISTS idx_match_predictions_match_id
+-            ON match_predictions (match_id)
+-        """))
+-        conn.execute(text("""
+-            CREATE INDEX IF NOT EXISTS idx_match_predictions_date
+-            ON match_predictions (tourney_date)
+-        """))
+-        conn.execute(text("""
+-            CREATE INDEX IF NOT EXISTS idx_match_predictions_model
+-            ON match_predictions (model_name)
+-        """))
++        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_match_predictions_match_id ON match_predictions (match_id)"))
++        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_match_predictions_date ON match_predictions (tourney_date)"))
++        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_match_predictions_model ON match_predictions (model_name)"))
+         conn.execute(text("ANALYZE match_predictions"))
+ 
+     print("Saved predictions to table: match_predictions")
+ 
+ 
+ if __name__ == "__main__":
+     main()
+diff --git a/scripts/test_match_prediction.py b/scripts/test_match_prediction.py
+index fd837fee2d801e252974907fcb1151c2779bb5ad..c1b9bb935834844f8dd050e27844a0fc2c04ed95 100644
+--- a/scripts/test_match_prediction.py
++++ b/scripts/test_match_prediction.py
+@@ -1,32 +1,37 @@
++import _bootstrap
++
+ import joblib
+ import pandas as pd
+-from sqlalchemy import create_engine
+ 
+-engine = create_engine("postgresql://tennis_user:tennis_pass@localhost:5432/tennis")
+ 
+-model = joblib.load("/opt/tennis_ai/models/match_winner/lightgbm_baseline.joblib")
++from src.db.engine import get_engine
++from config import resolve_model_artifact_path
++
++engine = get_engine()
++
++model = joblib.load(resolve_model_artifact_path("lightgbm_baseline.joblib"))
+ 
+ query = """
+ SELECT *
+ FROM match_features
+ WHERE (p1_id=208046 AND p2_id=208293)
+    OR (p1_id=208293 AND p2_id=208046)
+ ORDER BY tourney_date DESC
+ LIMIT 1
+ """
+ 
+ df = pd.read_sql(query, engine)
+ 
+ print(df[["p1_name","p2_name","tourney_date"]])
+ 
+ features = [c for c in df.columns if c not in [
+     "match_id","p1_name","p2_name","label","tourney_date"
+ ]]
+ 
+ X = df[features].fillna(0)
+ 
+ proba = model.predict_proba(X)[0][1]
+ 
+ print()
+ print("MODEL PREDICTION")
+ print("------------------")
+diff --git a/scripts/train_lightgbm_elo_model.py b/scripts/train_lightgbm_elo_model.py
+index 820ecd9fe4c8c32dbd17942f5f654fbe78036da2..8271356b795232029601fc360efda6959d080ea4 100644
+--- a/scripts/train_lightgbm_elo_model.py
++++ b/scripts/train_lightgbm_elo_model.py
+@@ -1,39 +1,44 @@
++import _bootstrap
++
+ import os
+ import joblib
+ import pandas as pd
+-from sqlalchemy import create_engine
++
+ from sklearn.compose import ColumnTransformer
+ from sklearn.pipeline import Pipeline
+ from sklearn.impute import SimpleImputer
+ from sklearn.metrics import accuracy_score, roc_auc_score, log_loss, brier_score_loss
+ from sklearn.preprocessing import OneHotEncoder
+ from lightgbm import LGBMClassifier
+ 
+-engine = create_engine("postgresql://tennis_user:tennis_pass@localhost:5432/tennis")
++from src.db.engine import get_engine
++from config import settings
++
++engine = get_engine()
+ 
+-MODEL_DIR="/opt/tennis_ai/models/match_winner"
++MODEL_DIR=settings.models_dir
+ os.makedirs(MODEL_DIR,exist_ok=True)
+ 
+ print("Loading dataset...")
+ 
+ df=pd.read_sql("""
+ SELECT *
+ FROM match_features_elo
+ WHERE label IS NOT NULL
+ ORDER BY tourney_date
+ """,engine)
+ 
+ df["tourney_date"]=pd.to_datetime(df["tourney_date"])
+ 
+ train=df[df["tourney_date"]<"2022-01-01"]
+ valid=df[(df["tourney_date"]>="2022-01-01")&(df["tourney_date"]<"2024-01-01")]
+ test=df[df["tourney_date"]>="2024-01-01"]
+ 
+ features=[
+ "surface",
+ "tourney_level",
+ "round",
+ "best_of",
+ 
+ "p1_rank",
+ "p2_rank",
+diff --git a/scripts/train_lightgbm_model.py b/scripts/train_lightgbm_model.py
+index cf6cce957b19315093ea2c3ffd31c1325c5cb9d6..d7e5f7520b2555bfd579d435c4167d694796afb5 100644
+--- a/scripts/train_lightgbm_model.py
++++ b/scripts/train_lightgbm_model.py
+@@ -1,132 +1,82 @@
+-import os
++import _bootstrap
++
+ import joblib
+ import pandas as pd
+-from sqlalchemy import create_engine
++from lightgbm import LGBMClassifier
+ from sklearn.compose import ColumnTransformer
+-from sklearn.pipeline import Pipeline
+ from sklearn.impute import SimpleImputer
+-from sklearn.metrics import accuracy_score, log_loss, roc_auc_score, brier_score_loss
++from sklearn.metrics import accuracy_score, brier_score_loss, log_loss, roc_auc_score
++from sklearn.pipeline import Pipeline
+ from sklearn.preprocessing import OneHotEncoder
+-from lightgbm import LGBMClassifier
+ 
+-DB_URL = "postgresql://tennis_user:tennis_pass@localhost:5432/tennis"
+-engine = create_engine(DB_URL)
++from config import settings
++from src.db.engine import get_engine
+ 
+-MODEL_DIR = "/opt/tennis_ai/models/match_winner"
+-os.makedirs(MODEL_DIR, exist_ok=True)
++engine = get_engine()
+ 
+ 
+ def main():
+     query = """
+     SELECT *
+     FROM match_features
+     WHERE label IS NOT NULL
+       AND tourney_date IS NOT NULL
+     ORDER BY tourney_date
+     """
+     df = pd.read_sql(query, engine)
+     df["tourney_date"] = pd.to_datetime(df["tourney_date"])
+ 
+     train_df = df[df["tourney_date"] < "2022-01-01"].copy()
+     valid_df = df[(df["tourney_date"] >= "2022-01-01") & (df["tourney_date"] < "2024-01-01")].copy()
+     test_df = df[df["tourney_date"] >= "2024-01-01"].copy()
+ 
+     candidate_features = [
+-        "surface",
+-        "tourney_level",
+-        "round",
+-        "best_of",
+-        "minutes",
+-        "p1_rank",
+-        "p2_rank",
+-        "p1_rank_points",
+-        "p2_rank_points",
+-        "p1_winrate_last10",
+-        "p2_winrate_last10",
+-        "p1_winrate_surface",
+-        "p2_winrate_surface",
+-        "p1_hold_rate",
+-        "p2_hold_rate",
+-        "p1_break_rate",
+-        "p2_break_rate",
+-        "p1_recent_form",
+-        "p2_recent_form",
+-        "p1_matches_last7days",
+-        "p2_matches_last7days",
+-        "rank_diff",
+-        "rank_points_diff",
+-        "winrate_last10_diff",
+-        "winrate_surface_diff",
+-        "hold_rate_diff",
+-        "break_rate_diff",
+-        "recent_form_diff",
+-        "matches_last7days_diff",
+-        "p1_h2h_wins",
+-        "p2_h2h_wins",
+-        "p1_h2h_surface",
+-        "p2_h2h_surface",
++        "surface", "tourney_level", "round", "best_of", "minutes",
++        "p1_rank", "p2_rank", "p1_rank_points", "p2_rank_points",
++        "p1_winrate_last10", "p2_winrate_last10", "p1_winrate_surface", "p2_winrate_surface",
++        "p1_hold_rate", "p2_hold_rate", "p1_break_rate", "p2_break_rate",
++        "p1_recent_form", "p2_recent_form", "p1_matches_last7days", "p2_matches_last7days",
++        "rank_diff", "rank_points_diff", "winrate_last10_diff", "winrate_surface_diff",
++        "hold_rate_diff", "break_rate_diff", "recent_form_diff", "matches_last7days_diff",
++        "p1_h2h_wins", "p2_h2h_wins", "p1_h2h_surface", "p2_h2h_surface",
+     ]
+ 
+     features = [c for c in candidate_features if c in df.columns]
+     target = "label"
+ 
+-    X_train = train_df[features]
+-    y_train = train_df[target]
+-    X_valid = valid_df[features]
+-    y_valid = valid_df[target]
+-    X_test = test_df[features]
+-    y_test = test_df[target]
++    X_train, y_train = train_df[features], train_df[target]
++    X_valid, y_valid = valid_df[features], valid_df[target]
++    X_test, y_test = test_df[features], test_df[target]
+ 
+-    categorical_candidates = ["surface", "tourney_level", "round"]
+-    categorical = [c for c in categorical_candidates if c in features]
++    categorical = [c for c in ["surface", "tourney_level", "round"] if c in features]
+     numeric = [c for c in features if c not in categorical]
+ 
+-    preprocessor = ColumnTransformer(
+-        transformers=[
+-            ("num", Pipeline([
+-                ("imputer", SimpleImputer(strategy="median")),
+-            ]), numeric),
+-            ("cat", Pipeline([
+-                ("imputer", SimpleImputer(strategy="most_frequent")),
+-                ("onehot", OneHotEncoder(handle_unknown="ignore"))
+-            ]), categorical),
+-        ],
+-        remainder="drop"
+-    )
++    preprocessor = ColumnTransformer([
++        ("num", Pipeline([("imputer", SimpleImputer(strategy="median"))]), numeric),
++        ("cat", Pipeline([("imputer", SimpleImputer(strategy="most_frequent")), ("onehot", OneHotEncoder(handle_unknown="ignore"))]), categorical),
++    ], remainder="drop")
+ 
+     model = Pipeline([
+         ("prep", preprocessor),
+-        ("clf", LGBMClassifier(
+-            n_estimators=300,
+-            learning_rate=0.05,
+-            num_leaves=31,
+-            subsample=0.8,
+-            colsample_bytree=0.8,
+-            random_state=42,
+-            verbose=-1
+-        ))
++        ("clf", LGBMClassifier(n_estimators=300, learning_rate=0.05, num_leaves=31, subsample=0.8, colsample_bytree=0.8, random_state=42, verbose=-1)),
+     ])
+ 
+     print("Training LightGBM...")
+     model.fit(X_train, y_train)
+ 
+-    for name, X, y in [
+-        ("valid", X_valid, y_valid),
+-        ("test", X_test, y_test),
+-    ]:
++    for name, X, y in [("valid", X_valid, y_valid), ("test", X_test, y_test)]:
+         proba = model.predict_proba(X)[:, 1]
+         pred = (proba >= 0.5).astype(int)
+-
+         print(f"\n{name.upper()} METRICS")
+         print("accuracy =", round(accuracy_score(y, pred), 6))
+         print("roc_auc  =", round(roc_auc_score(y, proba), 6))
+         print("log_loss =", round(log_loss(y, proba), 6))
+         print("brier    =", round(brier_score_loss(y, proba), 6))
+ 
+-    model_path = os.path.join(MODEL_DIR, "lightgbm_baseline.joblib")
++    model_path = settings.model_path("lightgbm_baseline.joblib")
+     joblib.dump(model, model_path)
+     print(f"\nSaved model to {model_path}")
+ 
+ 
+ if __name__ == "__main__":
+     main()
+diff --git a/scripts/train_match_model.py b/scripts/train_match_model.py
+index e258cb6e61f9c7dd2e23b48750140592e3420da6..069d48db3fe90550f10bee812b1a0026efbf9b20 100644
+--- a/scripts/train_match_model.py
++++ b/scripts/train_match_model.py
+@@ -1,126 +1,73 @@
+-import os
++import _bootstrap
++
+ import joblib
+ import pandas as pd
+-from sqlalchemy import create_engine
+ from sklearn.compose import ColumnTransformer
+-from sklearn.pipeline import Pipeline
+ from sklearn.impute import SimpleImputer
+-from sklearn.metrics import accuracy_score, log_loss, roc_auc_score, brier_score_loss
+-from sklearn.preprocessing import OneHotEncoder, StandardScaler
+ from sklearn.linear_model import LogisticRegression
++from sklearn.metrics import accuracy_score, brier_score_loss, log_loss, roc_auc_score
++from sklearn.pipeline import Pipeline
++from sklearn.preprocessing import OneHotEncoder, StandardScaler
+ 
+-DB_URL = "postgresql://tennis_user:tennis_pass@localhost:5432/tennis"
+-engine = create_engine(DB_URL)
++from config import settings
++from src.db.engine import get_engine
+ 
+-MODEL_DIR = "/opt/tennis_ai/models/match_winner"
+-os.makedirs(MODEL_DIR, exist_ok=True)
++engine = get_engine()
+ 
+ 
+ def main():
+     query = """
+     SELECT *
+     FROM match_features
+     WHERE label IS NOT NULL
+       AND tourney_date IS NOT NULL
+     ORDER BY tourney_date
+     """
+     df = pd.read_sql(query, engine)
+     df["tourney_date"] = pd.to_datetime(df["tourney_date"])
+ 
+     train_df = df[df["tourney_date"] < "2022-01-01"].copy()
+     valid_df = df[(df["tourney_date"] >= "2022-01-01") & (df["tourney_date"] < "2024-01-01")].copy()
+     features = [
+-        "surface",
+-        "tourney_level",
+-        "round",
+-        "best_of",
+-
+-        "p1_rank",
+-        "p2_rank",
+-
+-        "p1_rank_points",
+-        "p2_rank_points",
+-
+-        "p1_winrate_last10",
+-        "p2_winrate_last10",
+-
+-        "p1_winrate_surface",
+-        "p2_winrate_surface",
+-
+-        "p1_hold_rate",
+-        "p2_hold_rate",
+-
+-        "p1_break_rate",
+-        "p2_break_rate",
+-
+-        "p1_matches_last7days",
+-        "p2_matches_last7days",
+-
+-        "rank_diff",
+-        "rank_points_diff",
+-
+-        "winrate_last10_diff",
+-        "winrate_surface_diff",
+-
+-        "hold_rate_diff",
+-        "break_rate_diff",
+-
+-        "matches_last7days_diff",
+-
+-        "p1_h2h_wins",
+-        "p2_h2h_wins",
++        "surface", "tourney_level", "round", "best_of",
++        "p1_rank", "p2_rank", "p1_rank_points", "p2_rank_points",
++        "p1_winrate_last10", "p2_winrate_last10", "p1_winrate_surface", "p2_winrate_surface",
++        "p1_hold_rate", "p2_hold_rate", "p1_break_rate", "p2_break_rate",
++        "p1_matches_last7days", "p2_matches_last7days", "rank_diff", "rank_points_diff",
++        "winrate_last10_diff", "winrate_surface_diff", "hold_rate_diff", "break_rate_diff",
++        "matches_last7days_diff", "p1_h2h_wins", "p2_h2h_wins",
+     ]
+     target = "label"
+     test_df = df[df["tourney_date"] >= "2024-01-01"].copy()
+-    X_train = train_df[features]
+-    y_train = train_df[target]
+-
+-    X_valid = valid_df[features]
+-    y_valid = valid_df[target]
+ 
+-    X_test = test_df[features]
+-    y_test = test_df[target]
++    X_train, y_train = train_df[features], train_df[target]
++    X_valid, y_valid = valid_df[features], valid_df[target]
++    X_test, y_test = test_df[features], test_df[target]
+ 
+     categorical = ["surface", "tourney_level", "round"]
+     numeric = [c for c in features if c not in categorical]
+ 
+-    preprocessor = ColumnTransformer(
+-        transformers=[
+-            ("num", Pipeline([
+-                ("imputer", SimpleImputer(strategy="median")),
+-                ("scaler", StandardScaler())
+-            ]), numeric),
+-            ("cat", Pipeline([
+-                ("imputer", SimpleImputer(strategy="most_frequent")),
+-                ("onehot", OneHotEncoder(handle_unknown="ignore"))
+-            ]), categorical),
+-        ]
+-    )
+-
+-    model = Pipeline([
+-        ("prep", preprocessor),
+-        ("clf", LogisticRegression(max_iter=1000, n_jobs=-1))
++    preprocessor = ColumnTransformer([
++        ("num", Pipeline([("imputer", SimpleImputer(strategy="median")), ("scaler", StandardScaler())]), numeric),
++        ("cat", Pipeline([("imputer", SimpleImputer(strategy="most_frequent")), ("onehot", OneHotEncoder(handle_unknown="ignore"))]), categorical),
+     ])
+ 
++    model = Pipeline([("prep", preprocessor), ("clf", LogisticRegression(max_iter=1000, n_jobs=-1))])
+     model.fit(X_train, y_train)
+ 
+-    for name, X, y in [
+-        ("valid", X_valid, y_valid),
+-        ("test", X_test, y_test),
+-    ]:
++    for name, X, y in [("valid", X_valid, y_valid), ("test", X_test, y_test)]:
+         proba = model.predict_proba(X)[:, 1]
+         pred = (proba >= 0.5).astype(int)
+-
+         print(f"\n{name.upper()} METRICS")
+         print("accuracy =", round(accuracy_score(y, pred), 6))
+         print("roc_auc  =", round(roc_auc_score(y, proba), 6))
+         print("log_loss =", round(log_loss(y, proba), 6))
+         print("brier    =", round(brier_score_loss(y, proba), 6))
+ 
+-    model_path = os.path.join(MODEL_DIR, "logreg_baseline.joblib")
++    model_path = settings.model_path("logreg_baseline.joblib")
+     joblib.dump(model, model_path)
+     print(f"\nSaved model to {model_path}")
+ 
+ 
+ if __name__ == "__main__":
+     main()
+diff --git a/src/__init__.py b/src/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/src/db/__init__.py b/src/db/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/src/db/engine.py b/src/db/engine.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..16c706d37181947ae1b7707887f1945d4161904d
+--- /dev/null
++++ b/src/db/engine.py
+@@ -0,0 +1,7 @@
++from sqlalchemy import create_engine
++
++from config import settings
++
++
++def get_engine():
++    return create_engine(settings.db_url)
+diff --git a/src/features/__init__.py b/src/features/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/src/features/feature_builder.py b/src/features/feature_builder.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..1c94f588d843c27edad8a6269cee3e89f35f828f
+--- /dev/null
++++ b/src/features/feature_builder.py
+@@ -0,0 +1,146 @@
++from __future__ import annotations
++
++import numpy as np
++import pandas as pd
++
++
++def safe_div(a: pd.Series, b: pd.Series):
++    a = pd.to_numeric(a, errors="coerce")
++    b = pd.to_numeric(b, errors="coerce")
++    return np.where((b.notna()) & (b != 0), a / b, np.nan)
++
++
++def compute_player_rolling_features(df: pd.DataFrame) -> pd.DataFrame:
++    df = df.copy()
++    df = df.sort_values(["player_id", "tourney_date", "match_id"]).reset_index(drop=True)
++
++    df["hold_rate_match"] = safe_div(
++        df["service_games"] - (df["bp_faced"] - df["bp_saved"]),
++        df["service_games"],
++    )
++    df["break_rate_match"] = safe_div(
++        df["opp_bp_faced"] - df["opp_bp_saved"],
++        df["opp_service_games"],
++    )
++
++    df["p_win_shift"] = df.groupby("player_id")["is_win"].shift(1)
++    df["winrate_last10"] = (
++        df.groupby("player_id")["p_win_shift"]
++        .transform(lambda s: s.rolling(10, min_periods=1).mean())
++    )
++
++    df["hold_rate_shift"] = df.groupby("player_id")["hold_rate_match"].shift(1)
++    df["break_rate_shift"] = df.groupby("player_id")["break_rate_match"].shift(1)
++
++    df["hold_rate"] = (
++        df.groupby("player_id")["hold_rate_shift"]
++        .transform(lambda s: s.rolling(20, min_periods=3).mean())
++    )
++    df["break_rate"] = (
++        df.groupby("player_id")["break_rate_shift"]
++        .transform(lambda s: s.rolling(20, min_periods=3).mean())
++    )
++
++    df["surface_win_shift"] = df.groupby(["player_id", "surface"])["is_win"].shift(1)
++    df["winrate_surface"] = (
++        df.groupby(["player_id", "surface"])["surface_win_shift"]
++        .transform(lambda s: s.expanding(min_periods=1).mean())
++    )
++
++    df["matches_last7days"] = 0
++    for _, idx in df.groupby("player_id").groups.items():
++        idx = list(idx)
++        dates = df.loc[idx, "tourney_date"].values.astype("datetime64[D]")
++        counts = np.zeros(len(idx), dtype=int)
++        left = 0
++        for right in range(len(idx)):
++            while dates[right] - dates[left] > np.timedelta64(7, "D"):
++                left += 1
++            counts[right] = right - left
++        df.loc[idx, "matches_last7days"] = counts
++
++    return df
++
++
++def build_h2h_features(match_df: pd.DataFrame) -> pd.DataFrame:
++    match_df = match_df.sort_values(["tourney_date", "match_id"]).reset_index(drop=True)
++    h2h_counts = {}
++    p1_h2h_wins = []
++    p2_h2h_wins = []
++
++    for _, row in match_df.iterrows():
++        p1 = int(row["p1_id"])
++        p2 = int(row["p2_id"])
++
++        key = tuple(sorted((p1, p2)))
++        rec = h2h_counts.get(key, {p1: 0, p2: 0})
++
++        p1_h2h_wins.append(rec.get(p1, 0))
++        p2_h2h_wins.append(rec.get(p2, 0))
++
++        if row["label"] == 1:
++            rec[p1] = rec.get(p1, 0) + 1
++        else:
++            rec[p2] = rec.get(p2, 0) + 1
++
++        h2h_counts[key] = rec
++
++    match_df["p1_h2h_wins"] = p1_h2h_wins
++    match_df["p2_h2h_wins"] = p2_h2h_wins
++    return match_df
++
++
++def build_match_features(stats_df: pd.DataFrame) -> pd.DataFrame:
++    df = compute_player_rolling_features(stats_df)
++
++    counts = df.groupby("match_id").size()
++    valid_match_ids = counts[counts == 2].index
++
++    df2 = df[df["match_id"].isin(valid_match_ids)].copy()
++    df2 = df2.sort_values(["match_id", "player_id"]).reset_index(drop=True)
++
++    p1 = df2.groupby("match_id").nth(0).reset_index()
++    p2 = df2.groupby("match_id").nth(1).reset_index()
++
++    match_df = pd.DataFrame(
++        {
++            "match_id": p1["match_id"],
++            "tourney_date": p1["tourney_date"],
++            "surface": p1["surface"],
++            "tourney_level": p1["tourney_level"],
++            "round": p1["round"],
++            "best_of": p1["best_of"],
++            "p1_id": p1["player_id"],
++            "p1_name": p1["player_name"],
++            "p2_id": p2["player_id"],
++            "p2_name": p2["player_name"],
++            "p1_rank": p1["player_rank"],
++            "p2_rank": p2["player_rank"],
++            "p1_rank_points": p1["player_rank_points"],
++            "p2_rank_points": p2["player_rank_points"],
++            "p1_winrate_last10": p1["winrate_last10"],
++            "p2_winrate_last10": p2["winrate_last10"],
++            "p1_winrate_surface": p1["winrate_surface"],
++            "p2_winrate_surface": p2["winrate_surface"],
++            "p1_hold_rate": p1["hold_rate"],
++            "p2_hold_rate": p2["hold_rate"],
++            "p1_break_rate": p1["break_rate"],
++            "p2_break_rate": p2["break_rate"],
++            "p1_matches_last7days": p1["matches_last7days"],
++            "p2_matches_last7days": p2["matches_last7days"],
++            "label": p1["is_win"].astype(int),
++        }
++    )
++
++    match_df["rank_diff"] = match_df["p1_rank"] - match_df["p2_rank"]
++    match_df["rank_points_diff"] = match_df["p1_rank_points"] - match_df["p2_rank_points"]
++    match_df["winrate_last10_diff"] = match_df["p1_winrate_last10"] - match_df["p2_winrate_last10"]
++    match_df["winrate_surface_diff"] = match_df["p1_winrate_surface"] - match_df["p2_winrate_surface"]
++    match_df["hold_rate_diff"] = match_df["p1_hold_rate"] - match_df["p2_hold_rate"]
++    match_df["break_rate_diff"] = match_df["p1_break_rate"] - match_df["p2_break_rate"]
++    match_df["matches_last7days_diff"] = (
++        match_df["p1_matches_last7days"] - match_df["p2_matches_last7days"]
++    )
++
++    match_df = build_h2h_features(match_df)
++    return match_df.drop_duplicates(subset=["match_id"]).copy()
+diff --git a/src/inference/__init__.py b/src/inference/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/src/inference/predict.py b/src/inference/predict.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..1077b8cd4735cbe4bd79a1add7dab983079468e9
+--- /dev/null
++++ b/src/inference/predict.py
+@@ -0,0 +1,7 @@
++"""Inference entrypoint wrappers for extensible prediction flows."""
++
++
++def predict_baseline_to_table():
++    from scripts.predict_match_model import main
++
++    return main()
+diff --git a/src/models/__init__.py b/src/models/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/src/models/catboost_model.py b/src/models/catboost_model.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..76d4668b193e091fdcc6297eb358709ff6df2885
+--- /dev/null
++++ b/src/models/catboost_model.py
+@@ -0,0 +1,8 @@
++"""CatBoost model stub for future extension.
++
++TODO: add optional dependency and training pipeline integration.
++"""
++
++
++def build_model(**kwargs):
++    raise NotImplementedError("TODO: integrate catboost in next iteration")
+diff --git a/src/models/lightgbm_model.py b/src/models/lightgbm_model.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..2cb2ae92d9fd841ef8697e629f539ac46ca6dfb6
+--- /dev/null
++++ b/src/models/lightgbm_model.py
+@@ -0,0 +1,15 @@
++from lightgbm import LGBMClassifier
++
++
++def build_model(**kwargs):
++    params = {
++        "n_estimators": 300,
++        "learning_rate": 0.05,
++        "num_leaves": 31,
++        "subsample": 0.8,
++        "colsample_bytree": 0.8,
++        "random_state": 42,
++        "verbose": -1,
++    }
++    params.update(kwargs)
++    return LGBMClassifier(**params)
+diff --git a/src/models/logistic_model.py b/src/models/logistic_model.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..5ccb61a835118503262be53d63ae2efe445e8889
+--- /dev/null
++++ b/src/models/logistic_model.py
+@@ -0,0 +1,7 @@
++from sklearn.linear_model import LogisticRegression
++
++
++def build_model(**kwargs):
++    params = {"max_iter": 1000, "n_jobs": -1}
++    params.update(kwargs)
++    return LogisticRegression(**params)
+diff --git a/src/models/xgboost_model.py b/src/models/xgboost_model.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..910eb9c561a0e27865d121e38a88d58e07aa3a55
+--- /dev/null
++++ b/src/models/xgboost_model.py
+@@ -0,0 +1,8 @@
++"""XGBoost model stub for future extension.
++
++TODO: add optional dependency and training pipeline integration.
++"""
++
++
++def build_model(**kwargs):
++    raise NotImplementedError("TODO: integrate xgboost in next iteration")
+diff --git a/src/training/__init__.py b/src/training/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/src/training/train.py b/src/training/train.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e0586de94bed5697e61667083073f435e8cefddf
+--- /dev/null
++++ b/src/training/train.py
+@@ -0,0 +1,13 @@
++"""Training entrypoint wrappers for extensible model training."""
++
++
++def train_logreg_baseline():
++    from scripts.train_match_model import main
++
++    return main()
++
++
++def train_lightgbm_baseline():
++    from scripts.train_lightgbm_model import main
++
++    return main()
+diff --git a/src/utils/__init__.py b/src/utils/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/tests/conftest.py b/tests/conftest.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..2a855d9fdb8debae0b082088580a4c41e499e33c
+--- /dev/null
++++ b/tests/conftest.py
+@@ -0,0 +1,6 @@
++import sys
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++if str(ROOT) not in sys.path:
++    sys.path.insert(0, str(ROOT))
+diff --git a/tests/test_config.py b/tests/test_config.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..598dd0a6ec2a23344f2bb8c72a42714b57cc83ea
+--- /dev/null
++++ b/tests/test_config.py
+@@ -0,0 +1,19 @@
++from pathlib import Path
++
++from config import load_settings
++
++
++def test_load_settings_has_required_paths():
++    s = load_settings()
++    assert s.project_root.exists()
++    assert s.artifacts_dir.exists()
++    assert s.models_dir.exists()
++    assert isinstance(s.db_port, int)
++
++
++def test_model_path_builder():
++    s = load_settings()
++    model_path = s.model_path("demo.joblib")
++    assert isinstance(model_path, Path)
++    assert model_path.name == "demo.joblib"
++    assert model_path.parent == s.models_dir
+diff --git a/tests/test_feature_builder.py b/tests/test_feature_builder.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..acd9a88d2dc11753258bef3d1d00b44ff4c25ab4
+--- /dev/null
++++ b/tests/test_feature_builder.py
+@@ -0,0 +1,89 @@
++import pytest
++pd = pytest.importorskip("pandas")
++
++from src.features.feature_builder import build_match_features
++
++
++def test_build_match_features_smoke():
++    df = pd.DataFrame(
++        [
++            {
++                "match_id": 1,
++                "player_id": 10,
++                "player_name": "A",
++                "opponent_id": 20,
++                "opponent_name": "B",
++                "is_win": 1,
++                "surface": "Clay",
++                "tourney_date": "2024-01-01",
++                "tourney_level": "challenger",
++                "round": "R32",
++                "best_of": 3,
++                "minutes": 90,
++                "player_rank": 100,
++                "player_rank_points": 500,
++                "opponent_rank": 110,
++                "opponent_rank_points": 450,
++                "ace": 5,
++                "df": 2,
++                "svpt": 60,
++                "first_in": 35,
++                "first_won": 25,
++                "second_won": 10,
++                "service_games": 10,
++                "bp_saved": 3,
++                "bp_faced": 5,
++                "opp_ace": 2,
++                "opp_df": 3,
++                "opp_svpt": 55,
++                "opp_first_in": 30,
++                "opp_first_won": 20,
++                "opp_second_won": 12,
++                "opp_service_games": 10,
++                "opp_bp_saved": 2,
++                "opp_bp_faced": 4,
++            },
++            {
++                "match_id": 1,
++                "player_id": 20,
++                "player_name": "B",
++                "opponent_id": 10,
++                "opponent_name": "A",
++                "is_win": 0,
++                "surface": "Clay",
++                "tourney_date": "2024-01-01",
++                "tourney_level": "challenger",
++                "round": "R32",
++                "best_of": 3,
++                "minutes": 90,
++                "player_rank": 110,
++                "player_rank_points": 450,
++                "opponent_rank": 100,
++                "opponent_rank_points": 500,
++                "ace": 2,
++                "df": 3,
++                "svpt": 55,
++                "first_in": 30,
++                "first_won": 20,
++                "second_won": 12,
++                "service_games": 10,
++                "bp_saved": 2,
++                "bp_faced": 4,
++                "opp_ace": 5,
++                "opp_df": 2,
++                "opp_svpt": 60,
++                "opp_first_in": 35,
++                "opp_first_won": 25,
++                "opp_second_won": 10,
++                "opp_service_games": 10,
++                "opp_bp_saved": 3,
++                "opp_bp_faced": 5,
++            },
++        ]
++    )
++    df["tourney_date"] = pd.to_datetime(df["tourney_date"])
++
++    out = build_match_features(df)
++    assert len(out) == 1
++    assert "rank_diff" in out.columns
++    assert int(out.iloc[0]["label"]) in (0, 1)
+diff --git a/tests/test_script_compat.py b/tests/test_script_compat.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..9b8ba2710e50a7eaacee25dbd804499a91c18a36
+--- /dev/null
++++ b/tests/test_script_compat.py
+@@ -0,0 +1,47 @@
++from pathlib import Path
++from types import SimpleNamespace
++
++import config
++
++
++LEGACY_SCRIPTS = [
++    "build_elo_features.py",
++    "build_match_features.py",
++    "load_atp.py",
++    "load_matches_only.py",
++    "predict_match.py",
++    "predict_match_model.py",
++    "test_match_prediction.py",
++    "train_lightgbm_elo_model.py",
++    "train_lightgbm_model.py",
++    "train_match_model.py",
++]
++
++
++def test_legacy_scripts_bootstrap_import_present():
++    for script_name in LEGACY_SCRIPTS:
++        content = (Path("scripts") / script_name).read_text(encoding="utf-8")
++        assert "import _bootstrap" in content
++
++
++def test_model_artifact_resolution_prefers_new_path(tmp_path, monkeypatch):
++    new_models = tmp_path / "artifacts" / "models"
++    legacy_models = tmp_path / "models" / "match_winner"
++    new_models.mkdir(parents=True)
++    legacy_models.mkdir(parents=True)
++
++    model_name = "demo.joblib"
++    primary = new_models / model_name
++    legacy = legacy_models / model_name
++
++    dummy_settings = SimpleNamespace(
++        project_root=tmp_path,
++        model_path=lambda name: new_models / name,
++    )
++    monkeypatch.setattr(config, "settings", dummy_settings)
++
++    legacy.write_text("legacy", encoding="utf-8")
++    assert config.resolve_model_artifact_path(model_name) == legacy
++
++    primary.write_text("primary", encoding="utf-8")
++    assert config.resolve_model_artifact_path(model_name) == primary
+diff --git a/tests/test_smoke_structure.py b/tests/test_smoke_structure.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..1b0abb008395dd287fd0137a772b7ba39297038f
+--- /dev/null
++++ b/tests/test_smoke_structure.py
+@@ -0,0 +1,18 @@
++import pytest
++from importlib import import_module
++from pathlib import Path
++
++
++def test_sql_files_exist():
++    assert Path("sql/init.sql").exists()
++    assert Path("sql/player_match_stats.sql").exists()
++
++
++def test_smoke_import_train_predict_modules():
++    pytest.importorskip("numpy")
++
++    import_module("src.training.train")
++    import_module("src.inference.predict")
++    import_module("src.features.feature_builder")
++    import_module("src.models.logistic_model")
++    import_module("src.models.lightgbm_model")

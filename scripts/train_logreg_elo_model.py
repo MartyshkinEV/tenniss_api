@@ -1,0 +1,82 @@
+try:
+    import _bootstrap
+except ModuleNotFoundError:
+    from scripts import _bootstrap
+
+import joblib
+from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, brier_score_loss, log_loss, roc_auc_score
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+
+from config import settings
+from src.data import CATEGORICAL_FEATURES, ELO_FEATURES
+from src.data.pipeline import load_match_features_elo, split_dataset
+
+
+def main():
+    df = load_match_features_elo()
+    splits = split_dataset(df)
+    train_df = splits["train"]
+    valid_df = splits["valid"]
+    test_df = splits["test"]
+
+    target = "label"
+    X_train, y_train = train_df[ELO_FEATURES], train_df[target]
+    X_valid, y_valid = valid_df[ELO_FEATURES], valid_df[target]
+    X_test, y_test = test_df[ELO_FEATURES], test_df[target]
+
+    categorical = [c for c in CATEGORICAL_FEATURES if c in ELO_FEATURES]
+    numeric = [c for c in ELO_FEATURES if c not in categorical]
+
+    preprocessor = ColumnTransformer(
+        [
+            (
+                "num",
+                Pipeline(
+                    [
+                        ("imputer", SimpleImputer(strategy="median")),
+                        ("scaler", StandardScaler()),
+                    ]
+                ),
+                numeric,
+            ),
+            (
+                "cat",
+                Pipeline(
+                    [
+                        ("imputer", SimpleImputer(strategy="most_frequent")),
+                        ("onehot", OneHotEncoder(handle_unknown="ignore")),
+                    ]
+                ),
+                categorical,
+            ),
+        ]
+    )
+
+    model = Pipeline(
+        [
+            ("prep", preprocessor),
+            ("clf", LogisticRegression(max_iter=1000, n_jobs=-1)),
+        ]
+    )
+    model.fit(X_train, y_train)
+
+    for name, X, y in [("valid", X_valid, y_valid), ("test", X_test, y_test)]:
+        proba = model.predict_proba(X)[:, 1]
+        pred = (proba >= 0.5).astype(int)
+        print(f"\n{name.upper()} METRICS")
+        print("accuracy =", round(accuracy_score(y, pred), 6))
+        print("roc_auc  =", round(roc_auc_score(y, proba), 6))
+        print("log_loss =", round(log_loss(y, proba), 6))
+        print("brier    =", round(brier_score_loss(y, proba), 6))
+
+    model_path = settings.model_path("logreg_elo.joblib")
+    joblib.dump(model, model_path)
+    print(f"\nSaved model to {model_path}")
+
+
+if __name__ == "__main__":
+    main()

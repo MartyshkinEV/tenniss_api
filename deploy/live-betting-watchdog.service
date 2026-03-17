@@ -1,0 +1,18 @@
+[Unit]
+Description=Tennis AI live betting watchdog
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/tennis_ai
+ExecStart=/opt/tennis_ai/venv/bin/python /opt/tennis_ai/scripts/run_live_betting_watchdog.py
+Restart=always
+RestartSec=5
+User=root
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=append:/opt/tennis_ai/artifacts/live_betting/live_betting_watchdog.out
+StandardError=append:/opt/tennis_ai/artifacts/live_betting/live_betting_watchdog.out
+
+[Install]
+WantedBy=multi-user.target

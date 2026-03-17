@@ -1,0 +1,18 @@
+[Unit]
+Description=Tennis AI Fonbet events ingest
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/tennis_ai
+ExecStart=/opt/tennis_ai/venv/bin/python /opt/tennis_ai/scripts/ingest_fonbet_events.py --interval 20
+Restart=always
+RestartSec=5
+User=root
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=append:/opt/tennis_ai/artifacts/imports/fonbet_events_ingest.log
+StandardError=append:/opt/tennis_ai/artifacts/imports/fonbet_events_ingest.log
+
+[Install]
+WantedBy=multi-user.target

@@ -1,15 +1,12 @@
 import joblib
 import pandas as pd
 
-
+from config import resolve_default_model_artifact_path
 from src.db.engine import get_engine
-from config import settings
 
 engine = get_engine()
 
-model_path = settings.model_path("lightgbm_baseline.joblib")
-legacy_model_path = settings.project_root / "models" / "match_winner" / "lightgbm_baseline.joblib"
-model = joblib.load(model_path if model_path.exists() else legacy_model_path)
+model = joblib.load(resolve_default_model_artifact_path())
 
 query = """
 SELECT *

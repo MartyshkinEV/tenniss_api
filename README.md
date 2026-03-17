@@ -69,19 +69,25 @@ python scripts/build_elo_features.py
 
 7. Обучить модель:
 ```bash
-python scripts/train_match_model.py
-python scripts/train_lightgbm_model.py
-python scripts/train_lightgbm_elo_model.py
+./venv/bin/python scripts/train_match_model.py
+./venv/bin/python scripts/train_lightgbm_model.py
+./venv/bin/python scripts/train_logreg_elo_model.py
+./venv/bin/python scripts/train_lightgbm_elo_model.py
 ```
 
 8. Сделать batch-predict:
 ```bash
-python scripts/predict_match_model.py
+./venv/bin/python scripts/predict_match_model.py
 ```
 
 9. Сделать point-predict для пары игроков:
 ```bash
-python scripts/predict_match.py <P1_ID> <P2_ID>
+./venv/bin/python scripts/predict_match.py <P1_ID> <P2_ID>
+```
+
+10. Сравнить все обученные модели и обновить отчет:
+```bash
+./venv/bin/python scripts/compare_models.py --write-report
 ```
 
 ## Конфигурация
@@ -99,13 +105,89 @@ python scripts/predict_match.py <P1_ID> <P2_ID>
 ## Назначение текущих скриптов
 - `scripts/load_atp.py` — загрузка players/rankings/matches.
 - `scripts/load_matches_only.py` — загрузка только matches.
+- `scripts/ingest_fonbet_events.py` — каждые 20 секунд сохраняет полный `ma/events/list` в `fonbet_event_snapshots` и раскладывает события в `fonbet_events`.
 - `scripts/build_match_features.py` — формирование `match_features`.
 - `scripts/build_elo_features.py` — добавление ELO-фичей (`match_features_elo`).
 - `scripts/train_match_model.py` — обучение logistic baseline.
 - `scripts/train_lightgbm_model.py` — обучение lightgbm baseline.
 - `scripts/train_lightgbm_elo_model.py` — обучение lightgbm с ELO.
-- `scripts/predict_match_model.py` — пакетный предикт в `match_predictions`.
-- `scripts/predict_match.py` — предикт для конкретной пары игроков.
+- `scripts/train_historical_point_model.py` — обучение исторической модели `кто выиграет точку через offset`.
+- `scripts/train_historical_game_model.py` — обучение исторической модели `кто выиграет текущий гейм по состоянию поинта`.
+- `scripts/predict_match_model.py` — пакетный предикт; production default это `lightgbm_elo.joblib`.
+- `scripts/predict_match.py` — point-predict для конкретной пары игроков через production default model.
+- `scripts/compare_models.py` — сравнение всех локально доступных обученных моделей и генерация отчета.
+
+## Fonbet events/list
+Инициализация новых таблиц:
+```bash
+psql -h "$DB_HOST" -U "$DB_USER" -d "$DB_NAME" -f sql/init.sql
+```
+
+Запуск непрерывной загрузки полного каталога:
+```bash
+python scripts/ingest_fonbet_events.py --url "https://line-lb61-w.bk6bba-resources.com/ma/events/list?lang=en&version=72533210346&scopeMarket=1600"
+```
+
+Нормализация live-маркетов теперь может идти без второго HTTP-таймера, из последнего raw-снапшота в БД:
+```bash
+python scripts/ingest_live_markets.py --provider events
+```
+
+Прямой режим `--provider fonbet` оставлен только как fallback и для обычного потока больше не нужен.
+
+Асинхронный per-event ML watcher:
+```bash
+python scripts/run_event_ml_watch.py
+```
+
+Что делает watcher:
+- берёт актуальные live tennis match `event_id` из `fonbet_tennis_live_events_latest`
+- поднимает отдельную async-задачу на каждый event
+- циклически тянет `ma/events/event?eventId=...`
+- прогоняет ML scoring по доступным рынкам
+- пишет лучшие кандидаты в `artifacts/live_betting/event_ml_watch.jsonl`
+
+Одноразовый прогон по конкретному событию:
+```bash
+python scripts/run_event_ml_watch.py --event-id 63295583 --once
+```
+
+Непрерывный runtime по одному событию с полным RL-логированием:
+```bash
+python scripts/run_event_live_betting.py --event-id 63295863 --market-type all
+```
+
+Что даёт single-event runtime:
+- непрерывно тянет только один `eventId` через `ma/events/event`
+- использует существующий `LiveBettingRuntime`
+- Марковская модель + ML модели скорят рынки в каждом цикле
+- RL policy решает `bet / no_bet / duplicate / refresh_no_bet`
+- пишет event-specific файлы:
+  - `*_decisions.jsonl`
+  - `*_rl_snapshots.jsonl`
+  - `*_rl_actions.jsonl`
+  - `*_rl_outcomes.jsonl`
+  - `*_point_trajectories.jsonl`
+
+Полезные выборки:
+```sql
+SELECT snapshot_id, snapshot_utc, events_count
+FROM fonbet_event_snapshots
+ORDER BY snapshot_utc DESC;
+
+SELECT *
+FROM fonbet_events
+WHERE root_sport_id = 4
+ORDER BY snapshot_utc DESC, event_id;
+
+SELECT *
+FROM fonbet_events
+WHERE root_sport_id = 4 AND place = 'live'
+ORDER BY snapshot_utc DESC, event_id;
+
+SELECT * FROM fonbet_tennis_events_latest;
+SELECT * FROM fonbet_tennis_live_events_latest;
+```
 
 ## Что пока осталось в `scripts/`
 Это намеренно: текущая логика оставлена с thin-refactor для сохранения работоспособности пайплайна.
