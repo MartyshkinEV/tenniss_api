@@ -20,6 +20,8 @@ from config import (
     resolve_default_model_artifact_path,
     settings,
 )
+from src.betting import BettingAuditLogger, BettingPolicy, BettingPolicyConfig, DatabaseBetLogRecorder, MarketCandidate
+from src.db.engine import get_engine
 from src.data import ELO_FEATURES, align_frame_to_model, load_match_features_elo, load_player_match_stats
 from src.features.feature_builder import rank_diff_bucket
 from src.live.game_model import LayeredGamePredictor
@@ -29,6 +31,9 @@ from src.live.policy import BankrollBanditPolicy
 from src.live.total_model import SetTotalModel
 
 LOGGER = logging.getLogger(__name__)
+
+
+SUCCESSFUL_PLACEMENT_STATUSES = {"placed", "dry_run"}
 
 
 @dataclass(frozen=True)
@@ -1035,6 +1040,19 @@ class LiveBettingRuntime:
         self.bet_executor = bet_executor
         self.config = config or RuntimeConfig.from_settings()
         self.lookup = lookup or HistoricalLookup()
+        self.audit_logger = BettingAuditLogger(settings.market_bet_log_path)
+        try:
+            self.db_bet_log_recorder = DatabaseBetLogRecorder(get_engine())
+        except Exception:
+            self.db_bet_log_recorder = DatabaseBetLogRecorder(None)
+        self.betting_policy = BettingPolicy(
+            BettingPolicyConfig(
+                min_value=max(self.config.edge_threshold, 0.07),
+                min_model_probability=max(self.config.min_model_probability, 0.58),
+                min_data_quality_score=0.7,
+                min_recent_form=0.4,
+            )
+        )
         self.model = joblib.load(self.config.model_path)
         point_model_path = settings.models_dir / "historical_point_model.joblib"
         execution_model_path = settings.models_dir / "execution_survival_model.joblib"
@@ -1070,6 +1088,7 @@ class LiveBettingRuntime:
         self.bankroll_policy = BankrollBanditPolicy(
             outcomes_path=self.config.rl_outcomes_path,
             bankroll=self.state.current_bankroll,
+            starting_bankroll=self.config.bankroll if self.config.bankroll > 0 else self.state.current_bankroll,
         )
         acceptance_model_path = settings.models_dir / "leg_acceptance_model.joblib"
         metadata_path = settings.models_dir / "leg_acceptance_model.json"
@@ -1098,6 +1117,7 @@ class LiveBettingRuntime:
                     "model_type": "bankroll_bandit_policy",
                     "bankroll": self.state.current_bankroll,
                     "stake_levels": list(BankrollBanditPolicy.STAKE_LEVELS),
+                    "performance": self.bankroll_policy.performance_profile(),
                     "arms": stats,
                 },
                 ensure_ascii=True,
@@ -1134,6 +1154,10 @@ class LiveBettingRuntime:
         market: LiveMarket,
         candidate: ScoredSelection,
     ) -> float:
+        metadata_rows = int(self.acceptance_metadata.get("rows") or 0)
+        metadata_model_type = str(self.acceptance_metadata.get("model_type") or "")
+        if metadata_model_type == "dummy_classifier" or metadata_rows < 50:
+            return 0.5
         if self.acceptance_model is None:
             return 1.0
         try:
@@ -1145,7 +1169,7 @@ class LiveBettingRuntime:
             LOGGER.debug("Acceptance model failed for %s: %s", candidate.selection_id, exc)
         positive_rate = self.acceptance_metadata.get("positive_rate")
         if isinstance(positive_rate, (float, int)):
-            return float(positive_rate)
+            return min(max(float(positive_rate), 0.35), 0.65)
         return 1.0
 
     def _candidate_ranking_score(
@@ -1154,8 +1178,12 @@ class LiveBettingRuntime:
         candidate: ScoredSelection,
     ) -> tuple[float, float]:
         acceptance_probability = self._acceptance_probability(market, candidate)
-        ranking_score = float(candidate.edge) * acceptance_probability
+        ranking_score = float(candidate.edge) * acceptance_probability * self.bankroll_policy.risk_multiplier()
         return acceptance_probability, ranking_score
+
+    def _calibrate_probability(self, probability: float) -> float:
+        self.bankroll_policy.bankroll = self._available_bankroll()
+        return self.bankroll_policy.calibrate_probability(probability)
 
     def _score_market_details(
         self,
@@ -1188,6 +1216,7 @@ class LiveBettingRuntime:
         else:
             features = align_frame_to_model(self.model, frame, ELO_FEATURES)
             player1_probability = float(self.model.predict_proba(features)[0][1])
+        player1_probability = self._calibrate_probability(player1_probability)
         player2_probability = float(1.0 - player1_probability)
         if market.market_type == "point_plus_one_winner":
             execution_probability = row.get("point_execution_probability")
@@ -1307,6 +1336,142 @@ class LiveBettingRuntime:
             refreshed_candidate,
         )
 
+    def _data_quality_score(self, features: dict[str, Any]) -> float:
+        if len(features) <= 2:
+            return 1.0
+
+        groups = (
+            ("surface", "tourney_level"),
+            ("rank_diff", "elo_diff", "surface_elo_diff"),
+            ("recent_form_last5_diff", "p1_recent_form_last5", "p2_recent_form_last5"),
+            ("hold_rate_diff", "p1_hold_rate", "p2_hold_rate"),
+            ("break_rate_diff", "p1_break_rate", "p2_break_rate"),
+        )
+        present = 0
+        for group in groups:
+            for key in group:
+                value = features.get(key)
+                if value is None:
+                    continue
+                if isinstance(value, float) and pd.isna(value):
+                    continue
+                present += 1
+                break
+        return round(present / len(groups), 4)
+
+    def _recent_form_value(self, features: dict[str, Any], candidate: ScoredSelection) -> float | None:
+        if candidate.market.market_type == "set_total_over_under":
+            p1 = features.get("p1_recent_form_last5")
+            p2 = features.get("p2_recent_form_last5")
+            if p1 is None or p2 is None:
+                return None
+            return float((float(p1) + float(p2)) / 2.0)
+        key = "p1_recent_form_last5" if candidate.side == "player1" else "p2_recent_form_last5"
+        value = features.get(key)
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            return None
+        return float(value)
+
+    def _betting_policy_decision(
+        self,
+        market: LiveMarket,
+        candidate: ScoredSelection,
+        features: dict[str, Any],
+    ):
+        line_movement = market.raw.get("line_movement")
+        if line_movement is None:
+            line_movement = features.get("odds_movement")
+        try:
+            parsed_line_movement = None if line_movement is None else float(line_movement)
+        except (TypeError, ValueError):
+            parsed_line_movement = None
+        market_label = {
+            "match_winner": "match_winner",
+            "set_total_over_under": "games_total",
+            "next_game_winner": "games_handicap",
+            "point_plus_one_winner": "point_plus_one",
+        }.get(market.market_type, market.market_type)
+        return self.betting_policy.evaluate(
+            MarketCandidate(
+                match_id=str(market.event_id),
+                market=market_label,
+                pick=candidate.player_name,
+                odds=float(candidate.odds),
+                model_prob=float(candidate.model_probability),
+                stake=float(candidate.stake),
+                tournament=market.competition,
+                tournament_level=market.tourney_level,
+                surface=market.surface,
+                explanation={
+                    "elo_diff": features.get("elo_diff"),
+                    "surface_elo_diff": features.get("surface_elo_diff"),
+                    "avg_total_games": features.get("avg_total_games"),
+                    "hold_rate_diff": features.get("hold_rate_diff"),
+                    "break_rate_diff": features.get("break_rate_diff"),
+                    "three_set_rate_diff": features.get("three_set_rate_diff"),
+                    "line_movement": parsed_line_movement,
+                },
+                data_quality_score=self._data_quality_score(features),
+                recent_form=self._recent_form_value(features, candidate),
+                odds_movement=parsed_line_movement,
+            )
+        )
+
+    def _record_bet_log(
+        self,
+        market: LiveMarket,
+        candidate: ScoredSelection,
+        decision: Any,
+        *,
+        status: str,
+        features: dict[str, Any],
+        profit: float | None = None,
+        settled_at: str | None = None,
+    ) -> None:
+        payload = {
+            "settled_at": settled_at,
+            "match_id": str(market.event_id),
+            "event_id": str(market.event_id),
+            "market": {
+                "match_winner": "match_winner",
+                "set_total_over_under": "games_total",
+                "next_game_winner": "games_handicap",
+                "point_plus_one_winner": "point_plus_one",
+            }.get(market.market_type, market.market_type),
+            "market_type": market.market_type,
+            "pick": candidate.player_name,
+            "odds": float(candidate.odds),
+            "stake": float(candidate.stake),
+            "result": status,
+            "profit": profit,
+            "model_prob": float(candidate.model_probability),
+            "bookmaker_prob": float(decision.bookmaker_prob),
+            "value": float(decision.value),
+            "confidence": float(decision.confidence),
+            "threshold_value": float(self.betting_policy.config.min_value),
+            "min_probability": float(self.betting_policy.config.min_model_probability),
+            "data_quality_score": float(self._data_quality_score(features)),
+            "filter_surface": market.surface,
+            "filter_tourney_level": market.tourney_level,
+            "filter_form_window": 5,
+            "filter_passed": bool(decision.passed_filters),
+            "decision_reason": str(decision.reason),
+            "explanation_json": decision.explanation,
+            "source_json": {
+                "market_id": market.market_id,
+                "competition": market.competition,
+                "player1_name": market.player1_name,
+                "player2_name": market.player2_name,
+                "live_score": market.raw.get("score"),
+                "state_features": features,
+            },
+        }
+        self.audit_logger.append(payload)
+        try:
+            self.db_bet_log_recorder.write(payload)
+        except Exception:
+            LOGGER.debug("Failed to persist bet_log record for %s", market.market_id)
+
     def _append_decision_log(self, record: dict[str, Any]) -> None:
         self.config.decisions_path.parent.mkdir(parents=True, exist_ok=True)
         with self.config.decisions_path.open("a", encoding="utf-8") as handle:
@@ -1316,6 +1481,7 @@ class LiveBettingRuntime:
         self,
         market: LiveMarket,
         candidate: ScoredSelection,
+        decision: Any,
         features: dict[str, Any],
         player1_probability: float,
         player2_probability: float,
@@ -1345,25 +1511,78 @@ class LiveBettingRuntime:
                 }
             )
             return
-        result = self.bet_executor.place_prepared_bet(
-            candidate,
-            refreshed_selection or {},
-            slip_info_response or {},
-        )
+        try:
+            result = self.bet_executor.place_prepared_bet(
+                candidate,
+                refreshed_selection or {},
+                slip_info_response or {},
+            )
+        except Exception as exc:
+            LOGGER.warning("Bet placement failed for %s: %s", candidate.selection_id, exc)
+            self.rl_logger.log_action(
+                self._action_record(
+                    market=market,
+                    candidate=candidate,
+                    action="execution_error",
+                    reason=str(exc),
+                )
+            )
+            self._append_decision_log(
+                {
+                    "market_id": market.market_id,
+                    "event_id": market.event_id,
+                    "selection_id": candidate.selection_id,
+                    "status": "execution_error",
+                    "reason": str(exc),
+                }
+            )
+            return
+        result_status = str(result.get("status") or "unknown")
+        if result_status not in SUCCESSFUL_PLACEMENT_STATUSES:
+            self.rl_logger.log_snapshot(
+                self._snapshot_record(
+                    market=market,
+                    features=features,
+                    candidate=candidate,
+                    status=result_status,
+                    reason=str(result.get("error") or decision.reason),
+                    player1_probability=player1_probability,
+                    player2_probability=player2_probability,
+                )
+            )
+            self.rl_logger.log_action(
+                self._action_record(
+                    market=market,
+                    candidate=candidate,
+                    action=result_status,
+                    result=result,
+                    reason=str(result.get("error") or decision.reason),
+                )
+            )
+            self._append_decision_log(
+                {
+                    "market_id": market.market_id,
+                    "event_id": market.event_id,
+                    "selection_id": candidate.selection_id,
+                    "status": result_status,
+                    "reason": str(result.get("error") or decision.reason),
+                }
+            )
+            return
         self.state.mark_placed(candidate.selection_id)
         placed_snapshot = self._snapshot_record(
             market=market,
             features=features,
             candidate=candidate,
-            status=result.get("status", "placed"),
+            status=result_status,
             player1_probability=player1_probability,
             player2_probability=player2_probability,
         )
         self.rl_logger.log_snapshot(placed_snapshot)
         self.rl_outcome_tracker.observe_market(market.event_id, placed_snapshot)
-        stage = "bet_placed" if result.get("status") != "dry_run" else "bet_dry_run"
+        stage = "bet_placed" if result_status != "dry_run" else "bet_dry_run"
         if mode == "point_fast_mode":
-            stage = "bet_placed_fast_mode" if result.get("status") != "dry_run" else "bet_dry_run_fast_mode"
+            stage = "bet_placed_fast_mode" if result_status != "dry_run" else "bet_dry_run_fast_mode"
         self._log_point_trajectory(
             market=market,
             stage=stage,
@@ -1373,9 +1592,9 @@ class LiveBettingRuntime:
             player1_probability=player1_probability,
             player2_probability=player2_probability,
         )
-        action_name = "bet" if result.get("status") != "dry_run" else "bet_dry_run"
+        action_name = "bet" if result_status != "dry_run" else "bet_dry_run"
         if mode == "point_fast_mode":
-            action_name = "bet_fast_mode" if result.get("status") != "dry_run" else "bet_dry_run_fast_mode"
+            action_name = "bet_fast_mode" if result_status != "dry_run" else "bet_dry_run_fast_mode"
         self.rl_logger.log_action(
             self._action_record(
                 market=market,
@@ -1392,7 +1611,7 @@ class LiveBettingRuntime:
                 candidate=candidate,
                 result=result,
                 snapshot=placed_snapshot,
-                dry_run=result.get("status") == "dry_run",
+                dry_run=result_status == "dry_run",
             )
         )
         record = {
@@ -1403,11 +1622,19 @@ class LiveBettingRuntime:
             "odds": candidate.odds,
             "stake": candidate.stake,
             "edge": candidate.edge,
-            "status": result.get("status", "placed"),
+            "status": result_status,
+            "reason": decision.reason,
         }
         if mode is not None:
             record["mode"] = mode
         self._append_decision_log(record)
+        self._record_bet_log(
+            market=market,
+            candidate=candidate,
+            decision=decision,
+            status=result_status,
+            features=features,
+        )
         actions.append(record)
 
     def _select_express_candidates(self, queued_candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1457,13 +1684,35 @@ class LiveBettingRuntime:
             )
             return
 
-        result = self.bet_executor.place_express_bet(
-            [item["candidate"] for item in express_candidates],
-            stake=express_stake,
-        )
+        try:
+            result = self.bet_executor.place_express_bet(
+                [item["candidate"] for item in express_candidates],
+                stake=express_stake,
+            )
+        except Exception as exc:
+            LOGGER.warning("Express placement failed: %s", exc)
+            self._append_decision_log(
+                {
+                    "status": "express_execution_error",
+                    "reason": str(exc),
+                    "express_size": len(express_candidates),
+                }
+            )
+            return
+        result_status = str(result.get("status") or "unknown")
+        if result_status not in SUCCESSFUL_PLACEMENT_STATUSES:
+            self._append_decision_log(
+                {
+                    "status": "express_not_placed",
+                    "reason": str(result.get("error") or result_status),
+                    "express_size": len(express_candidates),
+                }
+            )
+            return
         for payload in express_candidates:
             market = payload["market"]
             candidate = payload["candidate"]
+            decision = payload["decision"]
             features = payload["features"]
             player1_probability = payload["player1_probability"]
             player2_probability = payload["player2_probability"]
@@ -1473,7 +1722,7 @@ class LiveBettingRuntime:
                 market=market,
                 features=features,
                 candidate=candidate,
-                status=result.get("status", "placed"),
+                status=result_status,
                 player1_probability=player1_probability,
                 player2_probability=player2_probability,
             )
@@ -1481,7 +1730,7 @@ class LiveBettingRuntime:
             self.rl_outcome_tracker.observe_market(market.event_id, placed_snapshot)
             self._log_point_trajectory(
                 market=market,
-                stage="bet_placed_express" if result.get("status") != "dry_run" else "bet_dry_run_express",
+                stage="bet_placed_express" if result_status != "dry_run" else "bet_dry_run_express",
                 features=features,
                 candidate=candidate,
                 result=result,
@@ -1492,7 +1741,7 @@ class LiveBettingRuntime:
                 self._action_record(
                     market=market,
                     candidate=candidate,
-                    action="bet_express" if result.get("status") != "dry_run" else "bet_dry_run_express",
+                    action="bet_express" if result_status != "dry_run" else "bet_dry_run_express",
                     result=result,
                     reason=mode,
                 )
@@ -1504,7 +1753,7 @@ class LiveBettingRuntime:
                     candidate=candidate,
                     result=result,
                     snapshot=placed_snapshot,
-                    dry_run=result.get("status") == "dry_run",
+                    dry_run=result_status == "dry_run",
                 )
             )
             record = {
@@ -1515,11 +1764,19 @@ class LiveBettingRuntime:
                 "odds": candidate.odds,
                 "stake": candidate.stake,
                 "edge": candidate.edge,
-                "status": result.get("status", "placed"),
+                "status": result_status,
                 "mode": "express",
                 "express_size": len(express_candidates),
+                "reason": decision.reason,
             }
             self._append_decision_log(record)
+            self._record_bet_log(
+                market=market,
+                candidate=candidate,
+                decision=decision,
+                status=result_status,
+                features=features,
+            )
             actions.append(record)
 
     def _snapshot_record(
@@ -1755,6 +2012,37 @@ class LiveBettingRuntime:
                 )
                 self._append_decision_log({"market_id": market.market_id, "status": "no_edge", "reason": no_bet_reason})
                 continue
+            policy_decision = self._betting_policy_decision(market, candidate, row)
+            if not policy_decision.should_bet:
+                self.rl_logger.log_snapshot(
+                    self._snapshot_record(
+                        market=market,
+                        features=row,
+                        candidate=candidate,
+                        status="policy_blocked",
+                        reason=policy_decision.reason,
+                        player1_probability=player1_probability,
+                        player2_probability=player2_probability,
+                    )
+                )
+                self.rl_logger.log_action(
+                    self._action_record(
+                        market=market,
+                        candidate=candidate,
+                        action="policy_blocked",
+                        reason=policy_decision.reason,
+                    )
+                )
+                self._append_decision_log(
+                    {
+                        "market_id": market.market_id,
+                        "event_id": market.event_id,
+                        "selection_id": candidate.selection_id,
+                        "status": "policy_blocked",
+                        "reason": policy_decision.reason,
+                    }
+                )
+                continue
             if self.state.has_seen(candidate.selection_id):
                 self._log_point_trajectory(
                     market=market,
@@ -1833,6 +2121,7 @@ class LiveBettingRuntime:
                             {
                                 "market": market,
                                 "candidate": candidate,
+                                "decision": policy_decision,
                                 "features": row,
                                 "player1_probability": player1_probability,
                                 "player2_probability": player2_probability,
@@ -1843,6 +2132,7 @@ class LiveBettingRuntime:
                         self._place_single_candidate(
                             market=market,
                             candidate=candidate,
+                            decision=policy_decision,
                             features=row,
                             player1_probability=player1_probability,
                             player2_probability=player2_probability,
@@ -1913,15 +2203,41 @@ class LiveBettingRuntime:
                     {
                         "market": refreshed_market,
                         "candidate": refreshed_candidate,
+                        "decision": self._betting_policy_decision(refreshed_market, refreshed_candidate, refreshed_row),
                         "features": refreshed_row,
                         "player1_probability": refreshed_player1_probability,
                         "player2_probability": refreshed_player2_probability,
                     }
                 )
             else:
+                refreshed_policy_decision = self._betting_policy_decision(
+                    refreshed_market,
+                    refreshed_candidate,
+                    refreshed_row,
+                )
+                if not refreshed_policy_decision.should_bet:
+                    self.rl_logger.log_action(
+                        self._action_record(
+                            market=refreshed_market,
+                            candidate=refreshed_candidate,
+                            action="policy_blocked_refresh",
+                            reason=refreshed_policy_decision.reason,
+                        )
+                    )
+                    self._append_decision_log(
+                        {
+                            "market_id": refreshed_market.market_id,
+                            "event_id": refreshed_market.event_id,
+                            "selection_id": refreshed_candidate.selection_id,
+                            "status": "policy_blocked_refresh",
+                            "reason": refreshed_policy_decision.reason,
+                        }
+                    )
+                    continue
                 self._place_single_candidate(
                     market=refreshed_market,
                     candidate=refreshed_candidate,
+                    decision=refreshed_policy_decision,
                     features=refreshed_row,
                     player1_probability=refreshed_player1_probability,
                     player2_probability=refreshed_player2_probability,
@@ -1944,6 +2260,24 @@ class LiveBettingRuntime:
                 self.state.apply_profit(float(profit))
                 settled_record["bankroll_after"] = self.state.current_bankroll
             self.rl_logger.log_outcome(settled_record)
+            self.audit_logger.append(
+                {
+                    "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                    "match_id": closed_record.get("event_id"),
+                    "event_id": closed_record.get("event_id"),
+                    "market": closed_record.get("market_type"),
+                    "pick": closed_record.get("player_name"),
+                    "odds": closed_record.get("odds_taken"),
+                    "stake": closed_record.get("stake"),
+                    "result": settled_record.get("status"),
+                    "profit": settled_record.get("profit"),
+                    "model_prob": closed_record.get("model_probability"),
+                    "bookmaker_prob": (1.0 / float(closed_record.get("odds_taken"))) if float(closed_record.get("odds_taken") or 0.0) > 0 else 0.0,
+                    "value": closed_record.get("edge"),
+                    "decision_reason": "settled_outcome",
+                    "source_json": settled_record,
+                }
+            )
             settled_any = True
             if settled_record.get("market_type") == "point_plus_one_winner":
                 self.rl_logger.log_point_trajectory(

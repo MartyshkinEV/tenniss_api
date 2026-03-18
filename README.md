@@ -6,6 +6,7 @@ ML/SQL-пайплайн для прогнозирования теннисных
 - загрузка ATP-данных в PostgreSQL;
 - построение табличных фичей (`match_features`, `match_features_elo`);
 - обучение baseline моделей (logreg/lightgbm);
+- отдельные market-модели для `match_winner`, `games_total`, `games_handicap`, `three_sets`;
 - инференс и запись предсказаний в таблицу.
 
 ## Структура проекта
@@ -73,6 +74,7 @@ python scripts/build_elo_features.py
 ./venv/bin/python scripts/train_lightgbm_model.py
 ./venv/bin/python scripts/train_logreg_elo_model.py
 ./venv/bin/python scripts/train_lightgbm_elo_model.py
+./venv/bin/python scripts/train_market_models.py
 ```
 
 8. Сделать batch-predict:
@@ -113,6 +115,8 @@ python scripts/build_elo_features.py
 - `scripts/train_lightgbm_elo_model.py` — обучение lightgbm с ELO.
 - `scripts/train_historical_point_model.py` — обучение исторической модели `кто выиграет точку через offset`.
 - `scripts/train_historical_game_model.py` — обучение исторической модели `кто выиграет текущий гейм по состоянию поинта`.
+- `scripts/train_market_models.py` — обучение отдельных моделей по рынкам `match_winner / games_total / games_handicap / three_sets` в вариантах `catboost` и `logreg`.
+- `scripts/run_market_backtest.py` — backtest и ROI/calibration-отчет по журналу ставок или CSV предсказаний.
 - `scripts/predict_match_model.py` — пакетный предикт; production default это `lightgbm_elo.joblib`.
 - `scripts/predict_match.py` — point-predict для конкретной пары игроков через production default model.
 - `scripts/compare_models.py` — сравнение всех локально доступных обученных моделей и генерация отчета.
@@ -196,6 +200,14 @@ SELECT * FROM fonbet_tennis_live_events_latest;
 ## TODO следующей итерации
 - Единый dataset builder и единый train/eval pipeline в `src/`.
 - Time-based split как общий компонент.
-- Подключение xgboost/catboost через опциональные зависимости.
 - Модельный registry/metadata.
 - Поддержка WTA.
+
+## Betting analytics
+- `sql/init.sql` теперь создает `bet_log`, `odds_history` и `game_stats`.
+- live snapshot recorder пишет историю линии в `odds_history`.
+- runtime пишет причину решения и value-метрики в `artifacts/betting/bet_log.jsonl`.
+- backtest/report:
+```bash
+python scripts/run_market_backtest.py --input artifacts/betting/bet_log.jsonl
+```

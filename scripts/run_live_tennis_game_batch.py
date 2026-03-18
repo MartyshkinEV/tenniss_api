@@ -163,12 +163,18 @@ def main() -> None:
     )
 
     if args.once:
-        for action in runtime.run_cycle():
-            print(action)
+        try:
+            for action in runtime.run_cycle():
+                print(action)
+        except Exception:
+            LOGGER.exception("live batch cycle crashed")
         return
 
     while True:
-        runtime.run_cycle()
+        try:
+            runtime.run_cycle()
+        except Exception:
+            LOGGER.exception("live batch cycle crashed")
         time.sleep(config.poll_interval_seconds)
 
 

@@ -71,3 +71,9 @@ def train_leg_acceptance():
     from scripts.train_leg_acceptance_model import main
 
     return main()
+
+
+def train_market_models():
+    from scripts.train_market_models import main
+
+    return main()

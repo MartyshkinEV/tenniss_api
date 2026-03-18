@@ -18,13 +18,15 @@ def _match_key(market: Any) -> tuple[str, str, str]:
 def _recommendation_action(market_type: str) -> str:
     if market_type == "set_total_over_under":
         return "bet_total"
+    if market_type == "next_game_winner":
+        return "bet_games"
     return "bet_winner"
 
 
 def build_recommendations(runtime: Any, markets: list[Any]) -> list[dict[str, Any]]:
     grouped: dict[tuple[str, str, str], list[Any]] = defaultdict(list)
     for market in markets:
-        if getattr(market, "market_type", "") not in {"match_winner", "set_total_over_under"}:
+        if getattr(market, "market_type", "") not in {"match_winner", "set_total_over_under", "next_game_winner"}:
             continue
         grouped[_match_key(market)].append(market)
 

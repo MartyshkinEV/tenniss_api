@@ -4,5 +4,6 @@ SQLAlchemy
 psycopg2-binary
 scikit-learn
 lightgbm
+catboost
 joblib
 pytest

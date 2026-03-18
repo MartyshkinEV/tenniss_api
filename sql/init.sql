@@ -129,6 +129,75 @@ CREATE TABLE IF NOT EXISTS live_market_snapshots (
 CREATE INDEX IF NOT EXISTS idx_live_market_snapshots_event_id ON live_market_snapshots(event_id);
 CREATE INDEX IF NOT EXISTS idx_live_market_snapshots_market_type ON live_market_snapshots(market_type);
 
+CREATE TABLE IF NOT EXISTS bet_log (
+    bet_id BIGSERIAL PRIMARY KEY,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    settled_at TIMESTAMPTZ,
+    match_id TEXT NOT NULL,
+    event_id TEXT,
+    market TEXT NOT NULL,
+    market_type TEXT,
+    pick TEXT NOT NULL,
+    odds DOUBLE PRECISION NOT NULL,
+    stake DOUBLE PRECISION NOT NULL,
+    result TEXT NOT NULL DEFAULT 'pending',
+    profit DOUBLE PRECISION,
+    model_prob DOUBLE PRECISION NOT NULL,
+    bookmaker_prob DOUBLE PRECISION NOT NULL,
+    value DOUBLE PRECISION NOT NULL,
+    confidence DOUBLE PRECISION,
+    threshold_value DOUBLE PRECISION,
+    min_probability DOUBLE PRECISION,
+    data_quality_score DOUBLE PRECISION,
+    filter_surface TEXT,
+    filter_tourney_level TEXT,
+    filter_form_window INTEGER,
+    filter_passed BOOLEAN NOT NULL DEFAULT FALSE,
+    decision_reason TEXT NOT NULL,
+    explanation_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    source_json JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE INDEX IF NOT EXISTS idx_bet_log_match_market
+ON bet_log(match_id, market, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_bet_log_market_result
+ON bet_log(market, result, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS odds_history (
+    odds_history_id BIGSERIAL PRIMARY KEY,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    match_id TEXT NOT NULL,
+    event_id TEXT,
+    market TEXT NOT NULL,
+    market_id TEXT,
+    selection TEXT,
+    line_value DOUBLE PRECISION,
+    odds DOUBLE PRECISION NOT NULL,
+    bookmaker_prob DOUBLE PRECISION,
+    timestamp_utc TIMESTAMPTZ NOT NULL,
+    source TEXT NOT NULL DEFAULT 'live_market_snapshots',
+    raw_json JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE INDEX IF NOT EXISTS idx_odds_history_match_market_ts
+ON odds_history(match_id, market, timestamp_utc DESC);
+
+CREATE INDEX IF NOT EXISTS idx_odds_history_event_market_ts
+ON odds_history(event_id, market, timestamp_utc DESC);
+
+CREATE TABLE IF NOT EXISTS game_stats (
+    player_id BIGINT PRIMARY KEY,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    avg_games DOUBLE PRECISION,
+    hold_pct DOUBLE PRECISION,
+    break_pct DOUBLE PRECISION,
+    tiebreak_rate DOUBLE PRECISION,
+    "3set_rate" DOUBLE PRECISION,
+    sample_matches INTEGER NOT NULL DEFAULT 0,
+    stats_json JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+
 CREATE TABLE IF NOT EXISTS live_match_player_stats (
     source TEXT NOT NULL,
     event_id TEXT NOT NULL,

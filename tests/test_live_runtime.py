@@ -54,6 +54,11 @@ class StubFonbetApiClient:
         return self.bet_result_response
 
 
+class FailingFonbetApiClient(StubFonbetApiClient):
+    def bet_request_id(self, payload):
+        raise RuntimeError("network timeout")
+
+
 class StubMarketFeedClient:
     def __init__(self, markets):
         self.markets = markets
@@ -128,6 +133,10 @@ class LiveRuntimeTest(unittest.TestCase):
         self.assertEqual(executor._placement_status({"result": "couponResult", "coupon": {"resultCode": 0}}), "placed")
         self.assertEqual(executor._placement_status({"result": "couponResult", "coupon": {"resultCode": 2}}), "odds_changed")
         self.assertEqual(executor._placement_status({"result": "couponResult", "coupon": {"resultCode": 100}}), "temporarily_suspended")
+        self.assertEqual(
+            executor._placement_status({"result": "error", "errorMessage": "network timeout"}),
+            "execution_error",
+        )
 
     def test_historical_lookup_uses_player_csv_and_neutral_stats_fallback(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1469,6 +1478,41 @@ class LiveRuntimeTest(unittest.TestCase):
         self.assertGreater(probability, 0.6)
         self.assertEqual(infer_server_side({"serveT": "2"}), "player2")
 
+    def test_place_prepared_bet_returns_execution_error_on_network_failure(self):
+        market = LiveMarket(
+            market_id="m-fail",
+            event_id="e-fail",
+            competition="ITF",
+            surface="Hard",
+            round_name="R32",
+            best_of=3,
+            tourney_level="itf",
+            player1_name="A",
+            player2_name="B",
+            player1_odds=1.8,
+            player2_odds=2.0,
+            market_type="next_game_winner",
+            raw={"player1_factor_id": 1750, "player1_param": 200, "player1_value": 1.8},
+        )
+        candidate = ScoredSelection(
+            market=market,
+            side="player1",
+            player_name="A",
+            model_probability=0.64,
+            implied_probability=1.0 / 1.8,
+            edge=0.0844,
+            odds=1.8,
+            stake=30.0,
+            player_id=1,
+        )
+        executor = FonbetBetExecutor(dry_run=False)
+        executor.api_client = FailingFonbetApiClient(slip_response={"result": "betSlipInfo", "bets": []})
+
+        result = executor.place_prepared_bet(candidate, {}, {"result": "betSlipInfo", "bets": []})
+
+        self.assertEqual(result["status"], "execution_error")
+        self.assertIn("network timeout", result["error"])
+
     def test_markov_point_model_prefers_server(self):
         model = MarkovGameModel()
         probability = model.predict_point_plus_one(
@@ -1543,6 +1587,31 @@ class LiveRuntimeTest(unittest.TestCase):
             self.assertIsNotNone(candidate)
             adjusted = policy.recommend_stake(candidate, market.market_type)
             self.assertLess(adjusted, candidate.stake)
+
+    def test_bankroll_bandit_policy_calibrates_overconfident_probability_down(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            outcomes = Path(tmp_dir) / "rl_outcomes.jsonl"
+            rows = []
+            for index in range(20):
+                rows.append(
+                    json.dumps(
+                        {
+                            "market_type": "next_game_winner",
+                            "odds_taken": 1.9,
+                            "stake": 30.0,
+                            "edge": 0.12,
+                            "model_probability": 0.8,
+                            "reward": 0.03 if index < 10 else -0.03,
+                        }
+                    )
+                )
+            outcomes.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+            policy = BankrollBanditPolicy(outcomes_path=outcomes, bankroll=1000.0, min_samples=10)
+
+            calibrated = policy.calibrate_probability(0.8)
+
+            self.assertLess(calibrated, 0.8)
 
     def test_bankroll_bandit_policy_selects_discrete_rl_stake(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

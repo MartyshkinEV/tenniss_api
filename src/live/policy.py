@@ -24,10 +24,19 @@ def _bucket_odds(odds: float) -> str:
 class BankrollBanditPolicy:
     STAKE_LEVELS = (30.0, 60.0, 90.0)
 
-    def __init__(self, outcomes_path: Path, bankroll: float, min_samples: int = 10):
+    def __init__(
+        self,
+        outcomes_path: Path,
+        bankroll: float,
+        min_samples: int = 10,
+        starting_bankroll: float | None = None,
+        recent_window: int = 200,
+    ):
         self.outcomes_path = outcomes_path
         self.bankroll = bankroll
         self.min_samples = min_samples
+        self.starting_bankroll = float(starting_bankroll if starting_bankroll is not None else bankroll)
+        self.recent_window = max(int(recent_window), int(min_samples))
 
     def _edge_bucket(self, edge: float) -> str:
         if edge < 0.08:
@@ -69,14 +78,94 @@ class BankrollBanditPolicy:
                 stats[key]["loss_count"] += 1.0
         return dict(stats)
 
+    def _recent_outcomes(self) -> list[dict[str, float]]:
+        if not self.outcomes_path.exists():
+            return []
+        rows: list[dict[str, float]] = []
+        for raw_line in self.outcomes_path.read_text(encoding="utf-8").splitlines():
+            if not raw_line.strip():
+                continue
+            row = json.loads(raw_line)
+            reward = row.get("reward")
+            probability = row.get("model_probability")
+            if reward is None or probability is None:
+                continue
+            rows.append(
+                {
+                    "reward": float(reward),
+                    "model_probability": float(probability),
+                    "won": 1.0 if float(reward) > 0 else 0.0,
+                }
+            )
+        if len(rows) <= self.recent_window:
+            return rows
+        return rows[-self.recent_window:]
+
+    def performance_profile(self) -> dict[str, float]:
+        rows = self._recent_outcomes()
+        if len(rows) < self.min_samples:
+            return {
+                "settled_count": float(len(rows)),
+                "avg_model_probability": 0.0,
+                "win_rate": 0.0,
+                "avg_reward": 0.0,
+                "probability_scale": 1.0,
+                "risk_multiplier": 1.0,
+                "bankroll_ratio": (
+                    float(self.bankroll / self.starting_bankroll)
+                    if self.starting_bankroll > 0 and self.bankroll > 0
+                    else 1.0
+                ),
+            }
+
+        count = float(len(rows))
+        avg_model_probability = sum(item["model_probability"] for item in rows) / count
+        win_rate = sum(item["won"] for item in rows) / count
+        avg_reward = sum(item["reward"] for item in rows) / count
+
+        probability_scale = min(max(win_rate / max(avg_model_probability, 1e-6), 0.55), 1.0)
+        bankroll_ratio = (
+            float(self.bankroll / self.starting_bankroll)
+            if self.starting_bankroll > 0 and self.bankroll > 0
+            else 1.0
+        )
+        risk_multiplier = probability_scale
+        if avg_reward < 0:
+            risk_multiplier *= max(0.5, 1.0 + (avg_reward * 12.0))
+        if bankroll_ratio < 0.85:
+            risk_multiplier *= 0.8
+        if bankroll_ratio < 0.7:
+            risk_multiplier *= 0.7
+        risk_multiplier = min(max(risk_multiplier, 0.35), 1.0)
+
+        return {
+            "settled_count": count,
+            "avg_model_probability": avg_model_probability,
+            "win_rate": win_rate,
+            "avg_reward": avg_reward,
+            "probability_scale": probability_scale,
+            "risk_multiplier": risk_multiplier,
+            "bankroll_ratio": bankroll_ratio,
+        }
+
+    def calibrate_probability(self, probability: float) -> float:
+        clamped = min(max(float(probability), 1e-6), 1.0 - 1e-6)
+        profile = self.performance_profile()
+        scale = float(profile["probability_scale"])
+        return min(max(0.5 + ((clamped - 0.5) * scale), 1e-6), 1.0 - 1e-6)
+
+    def risk_multiplier(self) -> float:
+        return float(self.performance_profile()["risk_multiplier"])
+
     def _allowed_stakes(self, bankroll: float) -> list[float]:
         allowed = [stake for stake in self.STAKE_LEVELS if bankroll <= 0 or stake <= bankroll]
         return allowed or [self.STAKE_LEVELS[0]]
 
     def _cap_candidate_stake(self, candidate: "ScoredSelection") -> float:
         capped_stake = max(self.STAKE_LEVELS[0], min(candidate.stake, self.STAKE_LEVELS[-1]))
+        risk_multiplier = self.risk_multiplier()
         if self.bankroll > 0:
-            capped_stake = min(capped_stake, round(self.bankroll * 0.03, 2))
+            capped_stake = min(capped_stake, round(self.bankroll * 0.02 * risk_multiplier, 2))
         if capped_stake < self.STAKE_LEVELS[0]:
             capped_stake = self.STAKE_LEVELS[0]
         nearest = min(self._allowed_stakes(self.bankroll), key=lambda stake: abs(stake - capped_stake))
@@ -93,13 +182,16 @@ class BankrollBanditPolicy:
 
         for candidate in candidates:
             preferred_stake = self._cap_candidate_stake(candidate)
+            calibrated_probability = self.calibrate_probability(candidate.model_probability)
+            risk_multiplier = self.risk_multiplier()
             for stake in self._allowed_stakes(self.bankroll):
                 stake_ratio = stake / self.STAKE_LEVELS[-1]
                 base_score = (
-                    float(candidate.edge) * 1.7
-                    + float(candidate.model_probability) * 0.8
+                    float(candidate.edge) * 1.4 * risk_multiplier
+                    + float(calibrated_probability) * 0.6
                     + (0.04 if stake == preferred_stake else 0.0)
-                    - (0.08 * abs(stake_ratio - (preferred_stake / self.STAKE_LEVELS[-1])))
+                    - (0.12 * abs(stake_ratio - (preferred_stake / self.STAKE_LEVELS[-1])))
+                    - (0.08 * stake_ratio)
                 )
                 arm = stats.get(self._arm_key(market_type, candidate.side, candidate.odds, stake, candidate.edge))
                 if arm and arm["count"] > 0:

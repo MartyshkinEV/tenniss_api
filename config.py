@@ -99,6 +99,9 @@ class Settings:
     live_decisions_path: Path
     live_market_snapshots_path: Path
     live_recommendations_path: Path
+    market_bet_log_path: Path
+    market_backtest_path: Path
+    market_analytics_path: Path
     live_rl_snapshots_path: Path
     live_rl_actions_path: Path
     live_rl_outcomes_path: Path
@@ -177,13 +180,13 @@ def load_settings() -> Settings:
         db_password=_get_env("DB_PASSWORD", "tennis_pass", dotenv_values),
         log_level=_get_env("LOG_LEVEL", "INFO", dotenv_values),
         live_poll_interval_seconds=int(_get_env("LIVE_POLL_INTERVAL_SECONDS", "20", dotenv_values)),
-        live_edge_threshold=_get_env_float("LIVE_EDGE_THRESHOLD", 0.05, dotenv_values),
-        live_min_model_probability=_get_env_float("LIVE_MIN_MODEL_PROBABILITY", 0.55, dotenv_values),
+        live_edge_threshold=_get_env_float("LIVE_EDGE_THRESHOLD", 0.07, dotenv_values),
+        live_min_model_probability=_get_env_float("LIVE_MIN_MODEL_PROBABILITY", 0.58, dotenv_values),
         live_min_odds=_get_env_float("LIVE_MIN_ODDS", 1.6, dotenv_values),
         live_max_odds=_get_env_float("LIVE_MAX_ODDS", 3.5, dotenv_values),
-        live_default_stake=_get_env_float("LIVE_DEFAULT_STAKE", 100.0, dotenv_values),
+        live_default_stake=_get_env_float("LIVE_DEFAULT_STAKE", 30.0, dotenv_values),
         live_bankroll=_get_env_float("LIVE_BANKROLL", 0.0, dotenv_values),
-        live_kelly_fraction=_get_env_float("LIVE_KELLY_FRACTION", 0.25, dotenv_values),
+        live_kelly_fraction=_get_env_float("LIVE_KELLY_FRACTION", 0.1, dotenv_values),
         live_bet_mode=_get_env("LIVE_BET_MODE", "single", dotenv_values).strip().lower(),
         live_express_size=max(2, int(_get_env("LIVE_EXPRESS_SIZE", "2", dotenv_values))),
         live_dry_run=_get_env_bool("LIVE_DRY_RUN", True, dotenv_values),
@@ -212,6 +215,27 @@ def load_settings() -> Settings:
             _get_env(
                 "LIVE_RECOMMENDATIONS_PATH",
                 str(artifacts_dir / "live_betting" / "rl_recommendations.jsonl"),
+                dotenv_values,
+            )
+        ).resolve(),
+        market_bet_log_path=Path(
+            _get_env(
+                "MARKET_BET_LOG_PATH",
+                str(artifacts_dir / "betting" / "bet_log.jsonl"),
+                dotenv_values,
+            )
+        ).resolve(),
+        market_backtest_path=Path(
+            _get_env(
+                "MARKET_BACKTEST_PATH",
+                str(artifacts_dir / "betting" / "backtest.json"),
+                dotenv_values,
+            )
+        ).resolve(),
+        market_analytics_path=Path(
+            _get_env(
+                "MARKET_ANALYTICS_PATH",
+                str(artifacts_dir / "betting" / "analytics.json"),
                 dotenv_values,
             )
         ).resolve(),
@@ -304,6 +328,9 @@ def load_settings() -> Settings:
     settings.live_state_path.parent.mkdir(parents=True, exist_ok=True)
     settings.live_decisions_path.parent.mkdir(parents=True, exist_ok=True)
     settings.live_recommendations_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.market_bet_log_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.market_backtest_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.market_analytics_path.parent.mkdir(parents=True, exist_ok=True)
     settings.live_rl_snapshots_path.parent.mkdir(parents=True, exist_ok=True)
     settings.live_rl_actions_path.parent.mkdir(parents=True, exist_ok=True)
     settings.live_rl_outcomes_path.parent.mkdir(parents=True, exist_ok=True)

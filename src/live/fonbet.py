@@ -4,6 +4,7 @@ import copy
 import gzip
 import json
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -11,6 +12,7 @@ from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from config import settings
+from src.betting.storage import OddsHistoryRecorder
 from src.db.engine import get_engine
 from src.live.runtime import LiveMarket, ScoredSelection
 
@@ -766,6 +768,7 @@ class SnapshotRecorder:
 class DatabaseSnapshotRecorder:
     def __init__(self, engine=None):
         self.engine = engine or get_engine()
+        self.odds_history_recorder = OddsHistoryRecorder(self.engine)
 
     def _record(self, market: LiveMarket) -> dict[str, Any]:
         raw = market.raw
@@ -845,6 +848,46 @@ class DatabaseSnapshotRecorder:
         )
         with self.engine.begin() as conn:
             conn.execute(statement, records)
+        odds_records: list[dict[str, Any]] = []
+        for market in markets:
+            raw = market.raw
+            timestamp_utc = raw.get("timestamp_utc") or datetime.now(timezone.utc).isoformat()
+            line_value = raw.get("total_line")
+            if line_value is None:
+                line_value = raw.get("target_game_number")
+            try:
+                parsed_line_value = float(line_value) if line_value not in (None, "") else None
+            except (TypeError, ValueError):
+                parsed_line_value = None
+            for selection, odds in (
+                ("player1", market.player1_odds),
+                ("player2", market.player2_odds),
+            ):
+                if odds in (None, "", 0, 0.0):
+                    continue
+                odds_float = float(odds)
+                odds_records.append(
+                    {
+                        "match_id": str(market.event_id),
+                        "event_id": str(market.event_id),
+                        "market": str(market.market_type),
+                        "market_id": market.market_id,
+                        "selection": selection,
+                        "line_value": parsed_line_value,
+                        "odds": odds_float,
+                        "bookmaker_prob": 1.0 / odds_float if odds_float > 0 else None,
+                        "timestamp_utc": timestamp_utc,
+                        "source": "live_market_snapshots",
+                        "raw_json": {
+                            "competition": market.competition,
+                            "surface": market.surface,
+                            "player1_name": market.player1_name,
+                            "player2_name": market.player2_name,
+                            "score": raw.get("score"),
+                        },
+                    }
+                )
+        self.odds_history_recorder.write_many(odds_records)
         return len(records)
 
 
@@ -1277,8 +1320,12 @@ class FonbetApiClient:
         except HTTPError as exc:
             response_body = exc.read().decode("utf-8", errors="replace")
             raise RuntimeError(f"Fonbet request failed with HTTP {exc.code}: {response_body}") from exc
+        except TimeoutError as exc:
+            raise RuntimeError(f"Fonbet request timed out: {exc}") from exc
         except URLError as exc:
             raise RuntimeError(f"Fonbet request failed: {exc.reason}") from exc
+        except OSError as exc:
+            raise RuntimeError(f"Fonbet request failed: {exc}") from exc
 
     def bet_slip_info(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._post_json_text(self.coupon_info_url, payload)
@@ -1321,6 +1368,15 @@ class FonbetBetExecutor:
     def _placement_status(self, bet_result_response: dict[str, Any]) -> str:
         if not isinstance(bet_result_response, dict):
             return "bet_result_unknown"
+        if bet_result_response.get("result") == "error":
+            message = str(
+                bet_result_response.get("errorMessage")
+                or bet_result_response.get("error")
+                or ""
+            ).lower()
+            if "temporarily unavailable" in message or "disconnected" in message:
+                return "temporarily_suspended"
+            return "execution_error"
         if bet_result_response.get("result") != "couponResult":
             return "bet_result_pending"
         coupon = bet_result_response.get("coupon", {})
@@ -1546,7 +1602,14 @@ class FonbetBetExecutor:
     def _poll_bet_result(self, payload: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         attempts: list[dict[str, Any]] = []
         for attempt_index in range(self.bet_result_retries + 1):
-            response = self.api_client.bet_result(payload)
+            try:
+                response = self.api_client.bet_result(payload)
+            except Exception as exc:
+                response = {
+                    "result": "error",
+                    "errorCode": 599,
+                    "errorMessage": str(exc),
+                }
             attempts.append(response)
             if response.get("result") == "couponResult":
                 return response, attempts
@@ -1573,15 +1636,23 @@ class FonbetBetExecutor:
         if self.dry_run:
             return {"status": "dry_run", "request": payload, "fonbet_requests": request_payloads}
 
-        self._validate_configured_session()
-        refreshed_selection, slip_info_response = self.refresh_candidate(candidate)
-        self._apply_refresh_to_request_payloads(request_payloads, refreshed_selection)
-        bet_request_id_response = self.api_client.bet_request_id(request_payloads["bet_request_id"])
-        if bet_request_id_response.get("requestId") not in (None, ""):
-            request_payloads["bet"]["requestId"] = bet_request_id_response["requestId"]
-            request_payloads["bet_result"]["requestId"] = bet_request_id_response["requestId"]
-        bet_response = self.api_client.bet(request_payloads["bet"])
-        bet_result_response, bet_result_attempts = self._poll_bet_result(request_payloads["bet_result"])
+        try:
+            self._validate_configured_session()
+            refreshed_selection, slip_info_response = self.refresh_candidate(candidate)
+            self._apply_refresh_to_request_payloads(request_payloads, refreshed_selection)
+            bet_request_id_response = self.api_client.bet_request_id(request_payloads["bet_request_id"])
+            if bet_request_id_response.get("requestId") not in (None, ""):
+                request_payloads["bet"]["requestId"] = bet_request_id_response["requestId"]
+                request_payloads["bet_result"]["requestId"] = bet_request_id_response["requestId"]
+            bet_response = self.api_client.bet(request_payloads["bet"])
+            bet_result_response, bet_result_attempts = self._poll_bet_result(request_payloads["bet_result"])
+        except Exception as exc:
+            return {
+                "status": "execution_error",
+                "request": payload,
+                "error": str(exc),
+                "fonbet_requests": request_payloads,
+            }
         return {
             "status": self._placement_status(bet_result_response),
             "request": payload,
@@ -1620,13 +1691,23 @@ class FonbetBetExecutor:
                 "fonbet_requests": request_payloads,
             }
 
-        self._validate_configured_session()
-        bet_request_id_response = self.api_client.bet_request_id(request_payloads["bet_request_id"])
-        if bet_request_id_response.get("requestId") not in (None, ""):
-            request_payloads["bet"]["requestId"] = bet_request_id_response["requestId"]
-            request_payloads["bet_result"]["requestId"] = bet_request_id_response["requestId"]
-        bet_response = self.api_client.bet(request_payloads["bet"])
-        bet_result_response, bet_result_attempts = self._poll_bet_result(request_payloads["bet_result"])
+        try:
+            self._validate_configured_session()
+            bet_request_id_response = self.api_client.bet_request_id(request_payloads["bet_request_id"])
+            if bet_request_id_response.get("requestId") not in (None, ""):
+                request_payloads["bet"]["requestId"] = bet_request_id_response["requestId"]
+                request_payloads["bet_result"]["requestId"] = bet_request_id_response["requestId"]
+            bet_response = self.api_client.bet(request_payloads["bet"])
+            bet_result_response, bet_result_attempts = self._poll_bet_result(request_payloads["bet_result"])
+        except Exception as exc:
+            return {
+                "status": "execution_error",
+                "request": payload,
+                "refreshed_selection": refreshed_selection,
+                "bet_slip_info_response": slip_info_response,
+                "error": str(exc),
+                "fonbet_requests": request_payloads,
+            }
         return {
             "status": self._placement_status(bet_result_response),
             "request": payload,
@@ -1665,14 +1746,26 @@ class FonbetBetExecutor:
         bet_result = self._session_payload_defaults(request_id=request_id)
         if self.dry_run:
             return {"status": "dry_run", "fonbet_requests": {"bet_slip_info": bet_slip_info, "bet_request_id": bet_request_id, "bet": bet, "bet_result": bet_result}}
-        self._validate_configured_session()
-        slip_info_response = self.api_client.bet_slip_info(bet_slip_info)
-        bet_request_id_response = self.api_client.bet_request_id(bet_request_id)
-        if bet_request_id_response.get("requestId") not in (None, ""):
-            bet["requestId"] = bet_request_id_response["requestId"]
-            bet_result["requestId"] = bet_request_id_response["requestId"]
-        bet_response = self.api_client.bet(bet)
-        bet_result_response, bet_result_attempts = self._poll_bet_result(bet_result)
+        try:
+            self._validate_configured_session()
+            slip_info_response = self.api_client.bet_slip_info(bet_slip_info)
+            bet_request_id_response = self.api_client.bet_request_id(bet_request_id)
+            if bet_request_id_response.get("requestId") not in (None, ""):
+                bet["requestId"] = bet_request_id_response["requestId"]
+                bet_result["requestId"] = bet_request_id_response["requestId"]
+            bet_response = self.api_client.bet(bet)
+            bet_result_response, bet_result_attempts = self._poll_bet_result(bet_result)
+        except Exception as exc:
+            return {
+                "status": "execution_error",
+                "error": str(exc),
+                "fonbet_requests": {
+                    "bet_slip_info": bet_slip_info,
+                    "bet_request_id": bet_request_id,
+                    "bet": bet,
+                    "bet_result": bet_result,
+                },
+            }
         return {
             "status": self._placement_status(bet_result_response),
             "bet_slip_info_response": slip_info_response,

@@ -1,0 +1,18 @@
+[Unit]
+Description=Tennis AI live game betting runner
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/tennis_ai
+ExecStart=/opt/tennis_ai/venv/bin/python /opt/tennis_ai/scripts/run_live_tennis_game_batch.py --interval 5 --run-tag bankroll900_games_real_diag --bankroll 900 --default-stake 30 --workers 6 --real
+Restart=always
+RestartSec=5
+User=root
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=append:/opt/tennis_ai/artifacts/live_betting/tennis-game-betting.log
+StandardError=append:/opt/tennis_ai/artifacts/live_betting/tennis-game-betting.log
+
+[Install]
+WantedBy=multi-user.target

@@ -21,9 +21,13 @@ class FeatureBuilderTest(unittest.TestCase):
                     "tourney_level": "challenger",
                     "round": "R32",
                     "best_of": 3,
+                    "score": "7-6(4) 3-6 6-4",
                     "minutes": 90,
                     "player_rank": 100,
                     "player_rank_points": 500,
+                    "elo": 1610,
+                    "surface_elo": 1585,
+                    "odds_movement": -0.08,
                     "opponent_rank": 110,
                     "opponent_rank_points": 450,
                     "ace": 5,
@@ -57,9 +61,13 @@ class FeatureBuilderTest(unittest.TestCase):
                     "tourney_level": "challenger",
                     "round": "R32",
                     "best_of": 3,
+                    "score": "7-6(4) 3-6 6-4",
                     "minutes": 90,
                     "player_rank": 110,
                     "player_rank_points": 450,
+                    "elo": 1540,
+                    "surface_elo": 1510,
+                    "odds_movement": 0.06,
                     "opponent_rank": 100,
                     "opponent_rank_points": 500,
                     "ace": 2,
@@ -92,6 +100,11 @@ class FeatureBuilderTest(unittest.TestCase):
         self.assertIn("p1_recent_form_last5", out.columns)
         self.assertIn("p1_h2h_surface_wins", out.columns)
         self.assertIn("minutes_last14days_diff", out.columns)
+        self.assertIn("avg_total_games", out.columns)
+        self.assertIn("three_set_rate_diff", out.columns)
+        self.assertIn("elo_diff", out.columns)
+        self.assertIn("surface_elo_diff", out.columns)
+        self.assertIn("odds_movement", out.columns)
         self.assertIn(int(out.iloc[0]["label"]), (0, 1))
 
 

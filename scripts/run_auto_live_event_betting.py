@@ -498,311 +498,335 @@ async def main_async(args: argparse.Namespace) -> None:
     except Exception:
         last_retrain_at = None
 
+    _log_cycle_event(
+        journal_path,
+        datetime.now(timezone.utc).isoformat(),
+        "runtime_started",
+        journal=str(journal_path),
+        state_path=str(state_path),
+        training_log=str(training_log_path),
+        interval_seconds=float(args.interval),
+        send_bet=bool(args.send_bet),
+        workers=int(args.workers),
+        max_bets_per_cycle=int(args.max_bets_per_cycle),
+        target_active_bets=int(args.target_active_bets),
+    )
+
     while True:
         now = datetime.now(timezone.utc).isoformat()
-        current_ids = await asyncio.to_thread(_live_root_event_ids)
-        active_bets = _prune_active_bets(active_bets, set(current_ids), args.active_bet_ttl_minutes)
-        recent_selection_items = _prune_recent_selection_keys(recent_selection_items, float(args.duplicate_key_ttl_minutes))
-        placed_selection_keys = _selection_keys_from_recent(recent_selection_items)
-        state["placed_selection_keys"] = sorted(placed_selection_keys)
-        state["recent_selection_keys"] = recent_selection_items
-        state["active_bets"] = active_bets
-        cursor = int(state.get("event_cursor") or 0)
-        if current_ids:
-            if args.max_events_per_cycle <= 0 or args.max_events_per_cycle >= len(current_ids):
-                selected_ids = list(current_ids)
-                state["event_cursor"] = 0
+        try:
+            current_ids = await asyncio.to_thread(_live_root_event_ids)
+            active_bets = _prune_active_bets(active_bets, set(current_ids), args.active_bet_ttl_minutes)
+            recent_selection_items = _prune_recent_selection_keys(recent_selection_items, float(args.duplicate_key_ttl_minutes))
+            placed_selection_keys = _selection_keys_from_recent(recent_selection_items)
+            state["placed_selection_keys"] = sorted(placed_selection_keys)
+            state["recent_selection_keys"] = recent_selection_items
+            state["active_bets"] = active_bets
+            cursor = int(state.get("event_cursor") or 0)
+            if current_ids:
+                if args.max_events_per_cycle <= 0 or args.max_events_per_cycle >= len(current_ids):
+                    selected_ids = list(current_ids)
+                    state["event_cursor"] = 0
+                else:
+                    cursor = cursor % len(current_ids)
+                    ordered_ids = current_ids[cursor:] + current_ids[:cursor]
+                    selected_ids = ordered_ids[: max(args.max_events_per_cycle, 1)]
+                    state["event_cursor"] = (cursor + max(args.max_events_per_cycle, 1)) % len(current_ids)
             else:
-                cursor = cursor % len(current_ids)
-                ordered_ids = current_ids[cursor:] + current_ids[:cursor]
-                selected_ids = ordered_ids[: max(args.max_events_per_cycle, 1)]
-                state["event_cursor"] = (cursor + max(args.max_events_per_cycle, 1)) % len(current_ids)
-        else:
-            selected_ids = []
-            state["event_cursor"] = 0
-        _save_state(state_path, state)
-        exposure_before_cycle = _current_exposure(active_bets)
-        cycle_results = []
-        if float(args.retrain_every_minutes) > 0:
-            now_dt = datetime.now(timezone.utc)
-            should_retrain = (
-                last_retrain_at is None
-                or (now_dt - last_retrain_at) >= timedelta(minutes=float(args.retrain_every_minutes))
-            )
-            if should_retrain:
-                retrained, _reason = _run_periodic_retrain(
-                    journal_path=journal_path,
-                    timestamp_utc=now,
-                    training_log_path=training_log_path,
-                    min_rows=int(args.retrain_min_rows),
+                selected_ids = []
+                state["event_cursor"] = 0
+            _save_state(state_path, state)
+            exposure_before_cycle = _current_exposure(active_bets)
+            cycle_results = []
+            if float(args.retrain_every_minutes) > 0:
+                now_dt = datetime.now(timezone.utc)
+                should_retrain = (
+                    last_retrain_at is None
+                    or (now_dt - last_retrain_at) >= timedelta(minutes=float(args.retrain_every_minutes))
                 )
-                if retrained:
-                    runtime = LiveBettingRuntime(
-                        market_feed_client=None,
-                        bet_executor=None,
-                        config=config,
+                if should_retrain:
+                    retrained, _reason = _run_periodic_retrain(
+                        journal_path=journal_path,
+                        timestamp_utc=now,
+                        training_log_path=training_log_path,
+                        min_rows=int(args.retrain_min_rows),
                     )
-                    last_retrain_at = now_dt
-                    state["last_retrain_utc"] = now_dt.isoformat()
-                    _save_state(state_path, state)
-        _log_cycle_event(
-            journal_path,
-            now,
-            "cycle_started",
-            live_events_total=len(current_ids),
-            selected_events=selected_ids,
-            active_bets_total=len(active_bets),
-            active_selection_keys=sorted(placed_selection_keys),
-            exposure_before_cycle=exposure_before_cycle,
-            max_total_exposure=float(args.max_total_exposure),
-            min_acceptance_probability=float(args.min_acceptance_probability),
-            max_bets_per_cycle=int(args.max_bets_per_cycle),
-            workers=int(args.workers),
-            duplicate_key_ttl_minutes=float(args.duplicate_key_ttl_minutes),
-            retrain_every_minutes=float(args.retrain_every_minutes),
-        )
-        if selected_ids:
-            semaphore = asyncio.Semaphore(max(args.workers, 1))
-
-            async def _score_one_event(event_id: int) -> dict:
-                async with semaphore:
-                    try:
-                        return await asyncio.to_thread(
-                            _score_event,
-                            event_id,
-                            runtime,
-                            float(args.min_acceptance_probability),
+                    if retrained:
+                        runtime = LiveBettingRuntime(
+                            market_feed_client=None,
+                            bet_executor=None,
+                            config=config,
                         )
-                    except Exception as exc:
-                        return {
-                            "event_id": event_id,
-                            "status": "event_failed",
-                            "reason": str(exc),
-                            "traceback": traceback.format_exc(),
-                        }
-
-            scored_events = await asyncio.gather(*[_score_one_event(event_id) for event_id in selected_ids])
-        else:
-            scored_events = []
-
-        candidate_pool: list[dict] = []
-        for scored in scored_events:
-            payload = _journal_event_payload(scored)
-            if scored.get("status") == "candidates":
-                payload["candidate_count"] = len(scored.get("candidates") or [])
+                        last_retrain_at = now_dt
+                        state["last_retrain_utc"] = now_dt.isoformat()
+                        _save_state(state_path, state)
             _log_cycle_event(
                 journal_path,
                 now,
-                "event_scored",
-                **payload,
+                "cycle_started",
+                live_events_total=len(current_ids),
+                selected_events=selected_ids,
+                active_bets_total=len(active_bets),
+                active_selection_keys=sorted(placed_selection_keys),
+                exposure_before_cycle=exposure_before_cycle,
+                max_total_exposure=float(args.max_total_exposure),
+                min_acceptance_probability=float(args.min_acceptance_probability),
+                max_bets_per_cycle=int(args.max_bets_per_cycle),
+                workers=int(args.workers),
+                duplicate_key_ttl_minutes=float(args.duplicate_key_ttl_minutes),
+                retrain_every_minutes=float(args.retrain_every_minutes),
             )
-            if scored.get("status") == "candidates":
-                candidate_pool.extend(scored.get("candidates") or [])
+            if selected_ids:
+                semaphore = asyncio.Semaphore(max(args.workers, 1))
 
-        ranked_candidates = _top_ranked(candidate_pool)
-        placement_budget = max(
-            int(args.max_bets_per_cycle),
-            max(int(args.target_active_bets) - len(active_bets), 0),
-        )
-        placement_keys = {
-            _selection_key(item["candidate"])
-            for item in ranked_candidates[:placement_budget]
-            if item.get("candidate") is not None
-        }
-        _log_cycle_event(
-            journal_path,
-            now,
-            "cycle_ranked",
-            candidate_events_total=len(candidate_pool),
-            ranked_events=[
-                {
-                    "event_id": item["event_id"],
-                    "market_id": item.get("market_id"),
-                    "market_type": item.get("market_type"),
-                    "selection_name": item.get("selection_name"),
-                    "selection_side": item.get("selection_side"),
-                    "ranking_score": item.get("ranking_score"),
-                    "acceptance_probability": item.get("acceptance_probability"),
-                    "edge": item.get("edge"),
-                    "stake": item.get("stake"),
-                }
-                for item in ranked_candidates[: max(placement_budget, 10)]
-            ],
-            placement_budget=placement_budget,
-            placement_keys=sorted(placement_keys),
-            target_active_bets=int(args.target_active_bets),
-        )
+                async def _score_one_event(event_id: int) -> dict:
+                    async with semaphore:
+                        try:
+                            return await asyncio.to_thread(
+                                _score_event,
+                                event_id,
+                                runtime,
+                                float(args.min_acceptance_probability),
+                            )
+                        except Exception as exc:
+                            return {
+                                "event_id": event_id,
+                                "status": "event_failed",
+                                "reason": str(exc),
+                                "traceback": traceback.format_exc(),
+                            }
 
-        for scored in scored_events:
-            if scored.get("status") != "candidates":
-                result = scored
+                scored_events = await asyncio.gather(*[_score_one_event(event_id) for event_id in selected_ids])
             else:
-                result = {
-                    "event_id": scored["event_id"],
-                    "status": "event_scored_only",
-                    "candidate_count": len(scored.get("candidates") or []),
-                    "market_count": scored.get("market_count"),
-                    "accepted_market_candidates": scored.get("accepted_market_candidates"),
-                }
-                for candidate_payload in scored.get("candidates") or []:
-                    selection_key = _selection_key(candidate_payload["candidate"])
-                    if placement_budget == 0 or selection_key not in placement_keys:
-                        deferred = {
-                            **candidate_payload,
-                            "status": "candidate_deferred",
-                            "reason": "ranked_below_cycle_cutoff",
-                        }
+                scored_events = []
+
+            candidate_pool: list[dict] = []
+            for scored in scored_events:
+                payload = _journal_event_payload(scored)
+                if scored.get("status") == "candidates":
+                    payload["candidate_count"] = len(scored.get("candidates") or [])
+                _log_cycle_event(
+                    journal_path,
+                    now,
+                    "event_scored",
+                    **payload,
+                )
+                if scored.get("status") == "candidates":
+                    candidate_pool.extend(scored.get("candidates") or [])
+
+            ranked_candidates = _top_ranked(candidate_pool)
+            placement_budget = max(
+                int(args.max_bets_per_cycle),
+                max(int(args.target_active_bets) - len(active_bets), 0),
+            )
+            placement_keys = {
+                _selection_key(item["candidate"])
+                for item in ranked_candidates[:placement_budget]
+                if item.get("candidate") is not None
+            }
+            _log_cycle_event(
+                journal_path,
+                now,
+                "cycle_ranked",
+                candidate_events_total=len(candidate_pool),
+                ranked_events=[
+                    {
+                        "event_id": item["event_id"],
+                        "market_id": item.get("market_id"),
+                        "market_type": item.get("market_type"),
+                        "selection_name": item.get("selection_name"),
+                        "selection_side": item.get("selection_side"),
+                        "ranking_score": item.get("ranking_score"),
+                        "acceptance_probability": item.get("acceptance_probability"),
+                        "edge": item.get("edge"),
+                        "stake": item.get("stake"),
+                    }
+                    for item in ranked_candidates[: max(placement_budget, 10)]
+                ],
+                placement_budget=placement_budget,
+                placement_keys=sorted(placement_keys),
+                target_active_bets=int(args.target_active_bets),
+            )
+
+            for scored in scored_events:
+                if scored.get("status") != "candidates":
+                    result = scored
+                else:
+                    result = {
+                        "event_id": scored["event_id"],
+                        "status": "event_scored_only",
+                        "candidate_count": len(scored.get("candidates") or []),
+                        "market_count": scored.get("market_count"),
+                        "accepted_market_candidates": scored.get("accepted_market_candidates"),
+                    }
+                    for candidate_payload in scored.get("candidates") or []:
+                        selection_key = _selection_key(candidate_payload["candidate"])
+                        if placement_budget == 0 or selection_key not in placement_keys:
+                            deferred = {
+                                **candidate_payload,
+                                "status": "candidate_deferred",
+                                "reason": "ranked_below_cycle_cutoff",
+                            }
+                            _log_cycle_event(
+                                journal_path,
+                                now,
+                                "placement_deferred",
+                                **_journal_event_payload(deferred),
+                            )
+                            continue
                         _log_cycle_event(
                             journal_path,
                             now,
-                            "placement_deferred",
-                            **_journal_event_payload(deferred),
+                            "placement_attempt",
+                            **_journal_event_payload(candidate_payload),
                         )
-                        continue
-                    _log_cycle_event(
-                        journal_path,
-                        now,
-                        "placement_attempt",
-                        **_journal_event_payload(candidate_payload),
-                    )
-                    placed_result = _process_event(
-                        candidate_payload,
-                        executor,
-                        placed_selection_keys,
-                        _current_exposure(active_bets),
-                        float(args.max_total_exposure),
-                    )
-                    if placed_result.get("status") == "placed" and placed_result.get("selection_key"):
-                        placed_selection_keys.add(str(placed_result["selection_key"]))
-                        state["placed_selection_keys"] = sorted(placed_selection_keys)
-                        active_bets.append(
+                        placed_result = _process_event(
+                            candidate_payload,
+                            executor,
+                            placed_selection_keys,
+                            _current_exposure(active_bets),
+                            float(args.max_total_exposure),
+                        )
+                        if placed_result.get("status") == "placed" and placed_result.get("selection_key"):
+                            placed_selection_keys.add(str(placed_result["selection_key"]))
+                            state["placed_selection_keys"] = sorted(placed_selection_keys)
+                            active_bets.append(
+                                {
+                                    "selection_key": placed_result["selection_key"],
+                                    "event_id": placed_result.get("event_id"),
+                                    "market_id": placed_result.get("market_id"),
+                                    "stake": placed_result.get("stake"),
+                                    "placed_at_utc": now,
+                                }
+                            )
+                            recent_selection_items.append(
+                                {
+                                    "selection_key": placed_result["selection_key"],
+                                    "event_id": placed_result.get("event_id"),
+                                    "market_id": placed_result.get("market_id"),
+                                    "placed_at_utc": now,
+                                }
+                            )
+                            state["recent_selection_keys"] = recent_selection_items
+                            state["active_bets"] = active_bets
+                            _save_state(state_path, state)
+                        cycle_results.append(placed_result)
+                        _append_jsonl(
+                            journal_path,
                             {
-                                "selection_key": placed_result["selection_key"],
-                                "event_id": placed_result.get("event_id"),
-                                "market_id": placed_result.get("market_id"),
-                                "stake": placed_result.get("stake"),
-                                "placed_at_utc": now,
-                            }
+                                "timestamp_utc": now,
+                                "action": "event_cycle",
+                                **placed_result,
+                            },
                         )
-                        recent_selection_items.append(
-                            {
-                                "selection_key": placed_result["selection_key"],
-                                "event_id": placed_result.get("event_id"),
-                                "market_id": placed_result.get("market_id"),
-                                "placed_at_utc": now,
-                            }
-                        )
-                        state["recent_selection_keys"] = recent_selection_items
-                        state["active_bets"] = active_bets
-                        _save_state(state_path, state)
-                    cycle_results.append(placed_result)
-                    _append_jsonl(
-                        journal_path,
-                        {
+                        training_payload = {
                             "timestamp_utc": now,
-                            "action": "event_cycle",
-                            **placed_result,
-                        },
+                            "event_id": placed_result.get("event_id"),
+                            "status": placed_result.get("status"),
+                            "selection_key": placed_result.get("selection_key"),
+                            "market_id": placed_result.get("market_id"),
+                            "market_type": placed_result.get("market_type"),
+                            "target_game_number": placed_result.get("target_game_number"),
+                            "selection_side": placed_result.get("selection_side"),
+                            "selection_name": placed_result.get("selection_name"),
+                            "stake": placed_result.get("stake"),
+                            "odds_before_refresh": placed_result.get("odds_before_refresh"),
+                            "model_probability": placed_result.get("model_probability"),
+                            "implied_probability": placed_result.get("implied_probability"),
+                            "edge": placed_result.get("edge"),
+                            "acceptance_probability": placed_result.get("acceptance_probability"),
+                            "ranking_score": placed_result.get("ranking_score"),
+                            "player1_probability": placed_result.get("player1_probability"),
+                            "player2_probability": placed_result.get("player2_probability"),
+                            "refreshed_selection": placed_result.get("refreshed_selection"),
+                            "bet_result_response": (placed_result.get("bet_execution") or {}).get("bet_result_response"),
+                        }
+                        _append_jsonl(training_log_path, training_payload)
+                    cycle_results.append(result)
+                    continue
+                if result.get("status") == "placed" and result.get("selection_key"):
+                    placed_selection_keys.add(str(result["selection_key"]))
+                    state["placed_selection_keys"] = sorted(placed_selection_keys)
+                    active_bets.append(
+                        {
+                            "selection_key": result["selection_key"],
+                            "event_id": result.get("event_id"),
+                            "market_id": result.get("market_id"),
+                            "stake": result.get("stake"),
+                            "placed_at_utc": now,
+                        }
                     )
-                    training_payload = {
-                        "timestamp_utc": now,
-                        "event_id": placed_result.get("event_id"),
-                        "status": placed_result.get("status"),
-                        "selection_key": placed_result.get("selection_key"),
-                        "market_id": placed_result.get("market_id"),
-                        "market_type": placed_result.get("market_type"),
-                        "target_game_number": placed_result.get("target_game_number"),
-                        "selection_side": placed_result.get("selection_side"),
-                        "selection_name": placed_result.get("selection_name"),
-                        "stake": placed_result.get("stake"),
-                        "odds_before_refresh": placed_result.get("odds_before_refresh"),
-                        "model_probability": placed_result.get("model_probability"),
-                        "implied_probability": placed_result.get("implied_probability"),
-                        "edge": placed_result.get("edge"),
-                        "acceptance_probability": placed_result.get("acceptance_probability"),
-                        "ranking_score": placed_result.get("ranking_score"),
-                        "player1_probability": placed_result.get("player1_probability"),
-                        "player2_probability": placed_result.get("player2_probability"),
-                        "refreshed_selection": placed_result.get("refreshed_selection"),
-                        "bet_result_response": (placed_result.get("bet_execution") or {}).get("bet_result_response"),
-                    }
-                    _append_jsonl(training_log_path, training_payload)
+                    recent_selection_items.append(
+                        {
+                            "selection_key": result["selection_key"],
+                            "event_id": result.get("event_id"),
+                            "market_id": result.get("market_id"),
+                            "placed_at_utc": now,
+                        }
+                    )
+                    state["recent_selection_keys"] = recent_selection_items
+                    state["active_bets"] = active_bets
+                    _save_state(state_path, state)
                 cycle_results.append(result)
-                continue
-            if result.get("status") == "placed" and result.get("selection_key"):
-                placed_selection_keys.add(str(result["selection_key"]))
-                state["placed_selection_keys"] = sorted(placed_selection_keys)
-                active_bets.append(
+                _append_jsonl(
+                    journal_path,
                     {
-                        "selection_key": result["selection_key"],
-                        "event_id": result.get("event_id"),
-                        "market_id": result.get("market_id"),
-                        "stake": result.get("stake"),
-                        "placed_at_utc": now,
-                    }
+                        "timestamp_utc": now,
+                        "action": "event_cycle",
+                        **result,
+                    },
                 )
-                recent_selection_items.append(
-                    {
-                        "selection_key": result["selection_key"],
-                        "event_id": result.get("event_id"),
-                        "market_id": result.get("market_id"),
-                        "placed_at_utc": now,
-                    }
-                )
-                state["recent_selection_keys"] = recent_selection_items
-                state["active_bets"] = active_bets
-                _save_state(state_path, state)
-            cycle_results.append(result)
+                training_payload = {
+                    "timestamp_utc": now,
+                    "event_id": result.get("event_id"),
+                    "status": result.get("status"),
+                    "selection_key": result.get("selection_key"),
+                    "market_id": result.get("market_id"),
+                    "market_type": result.get("market_type"),
+                    "target_game_number": result.get("target_game_number"),
+                    "selection_side": result.get("selection_side"),
+                    "selection_name": result.get("selection_name"),
+                    "stake": result.get("stake"),
+                    "odds_before_refresh": result.get("odds_before_refresh"),
+                    "model_probability": result.get("model_probability"),
+                    "implied_probability": result.get("implied_probability"),
+                    "edge": result.get("edge"),
+                    "acceptance_probability": result.get("acceptance_probability"),
+                    "ranking_score": result.get("ranking_score"),
+                    "player1_probability": result.get("player1_probability"),
+                    "player2_probability": result.get("player2_probability"),
+                    "refreshed_selection": result.get("refreshed_selection"),
+                    "bet_result_response": (result.get("bet_execution") or {}).get("bet_result_response"),
+                }
+                _append_jsonl(training_log_path, training_payload)
+
             _append_jsonl(
                 journal_path,
                 {
                     "timestamp_utc": now,
-                    "action": "event_cycle",
-                    **result,
+                    "action": "heartbeat",
+                    "live_events_total": len(current_ids),
+                    "selected_events": selected_ids,
+                    "placed_events": [row["event_id"] for row in cycle_results if row.get("status") == "placed"],
+                    "skipped_events": [row["event_id"] for row in cycle_results if row.get("status") != "placed"],
+                    "placed_selection_keys_total": len(placed_selection_keys),
+                    "active_bets_total": len(active_bets),
+                    "exposure_before_cycle": exposure_before_cycle,
+                    "exposure_after_cycle": _current_exposure(active_bets),
+                    "max_total_exposure": float(args.max_total_exposure),
+                    "candidate_events_total": len(candidate_pool),
+                    "ranked_for_placement": sorted(placement_keys),
                 },
             )
-            training_payload = {
-                "timestamp_utc": now,
-                "event_id": result.get("event_id"),
-                "status": result.get("status"),
-                "selection_key": result.get("selection_key"),
-                "market_id": result.get("market_id"),
-                "market_type": result.get("market_type"),
-                "target_game_number": result.get("target_game_number"),
-                "selection_side": result.get("selection_side"),
-                "selection_name": result.get("selection_name"),
-                "stake": result.get("stake"),
-                "odds_before_refresh": result.get("odds_before_refresh"),
-                "model_probability": result.get("model_probability"),
-                "implied_probability": result.get("implied_probability"),
-                "edge": result.get("edge"),
-                "acceptance_probability": result.get("acceptance_probability"),
-                "ranking_score": result.get("ranking_score"),
-                "player1_probability": result.get("player1_probability"),
-                "player2_probability": result.get("player2_probability"),
-                "refreshed_selection": result.get("refreshed_selection"),
-                "bet_result_response": (result.get("bet_execution") or {}).get("bet_result_response"),
-            }
-            _append_jsonl(training_log_path, training_payload)
-
-        _append_jsonl(
-            journal_path,
-            {
-                "timestamp_utc": now,
-                "action": "heartbeat",
-                "live_events_total": len(current_ids),
-                "selected_events": selected_ids,
-                "placed_events": [row["event_id"] for row in cycle_results if row.get("status") == "placed"],
-                "skipped_events": [row["event_id"] for row in cycle_results if row.get("status") != "placed"],
-                "placed_selection_keys_total": len(placed_selection_keys),
-                "active_bets_total": len(active_bets),
-                "exposure_before_cycle": exposure_before_cycle,
-                "exposure_after_cycle": _current_exposure(active_bets),
-                "max_total_exposure": float(args.max_total_exposure),
-                "candidate_events_total": len(candidate_pool),
-                "ranked_for_placement": sorted(placement_keys),
-            },
-        )
+        except Exception as exc:
+            LOGGER.exception("auto live event betting cycle failed")
+            _log_cycle_event(
+                journal_path,
+                now,
+                "cycle_failed",
+                reason=str(exc),
+                traceback=traceback.format_exc(),
+            )
         await asyncio.sleep(max(args.interval, 1.0))
 
 
